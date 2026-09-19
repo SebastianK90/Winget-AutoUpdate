@@ -110,7 +110,7 @@ function Get-IsDarkMode {
     # 2. Check active user profiles under HKEY_USERS (for SYSTEM / ServiceUI context)
     try {
         $userSids = Get-ChildItem -Path "Registry::HKEY_USERS" -ErrorAction SilentlyContinue |
-            Where-Object { $_.PSChildName -match '^S-1-5-21-\d+-\d+-\d+-\d+$' }
+            Where-Object { $_.PSChildName -match '^S-1-(5-21|12-1)-\d+(-\d+)+$' }
         foreach ($sid in $userSids) {
             $path = "Registry::HKEY_USERS\$($sid.PSChildName)\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
             if (Test-Path $path) {
@@ -257,6 +257,10 @@ foreach ($app in @($pendingData.Apps)) {
 
 # Sort ascending so most urgent apps appear at the top
 $sortedRows = @($appRows | Sort-Object DaysRemainingValue)
+
+# If no apps have deadlines, there is nothing to prompt for
+if ($sortedRows.Count -eq 0) { Exit 0 }
+
 $script:HasFinalDayApps = @($sortedRows | Where-Object { $_.IsFinalDay }).Count -gt 0
 $script:AllFinalDay     = @($sortedRows | Where-Object { -not $_.IsFinalDay }).Count -eq 0
 #endregion BUILD ROW OBJECTS
@@ -930,8 +934,9 @@ function Set-WAUSnoozeTrigger {
             $snoozeTrigger = New-ScheduledTaskTrigger -Once -At $nextPrompt
             # Retain existing recurring triggers (Logon, Daily, Weekly) and discard expired Once triggers
             $cleanTriggers = @($wauTask.Triggers | Where-Object {
-                $_.CimClass.CimClassName -ne 'MSFT_TaskTimeTrigger' -or
-                ($_.StartBoundary -and [DateTime]::Parse($_.StartBoundary) -gt (Get-Date))
+                if ($_.CimClass.CimClassName -ne 'MSFT_TaskTimeTrigger') { return $true }
+                $parsedDt = [DateTime]::MinValue
+                $_.StartBoundary -and [DateTime]::TryParse($_.StartBoundary, [ref]$parsedDt) -and $parsedDt -gt (Get-Date)
             })
             $cleanTriggers += $snoozeTrigger
             Set-ScheduledTask -TaskPath $wauTask.TaskPath -TaskName $wauTask.TaskName -Trigger $cleanTriggers | Out-Null
@@ -952,7 +957,14 @@ function Clear-WAUSnoozeTrigger {
                 $_.CimClass.CimClassName -ne 'MSFT_TaskTimeTrigger'
             })
             if ($cleanTriggers.Count -ne $wauTask.Triggers.Count) {
-                Set-ScheduledTask -TaskPath $wauTask.TaskPath -TaskName $wauTask.TaskName -Trigger $cleanTriggers | Out-Null
+                if ($cleanTriggers.Count -gt 0) {
+                    Set-ScheduledTask -TaskPath $wauTask.TaskPath -TaskName $wauTask.TaskName -Trigger $cleanTriggers | Out-Null
+                }
+                else {
+                    # No recurring triggers remain -- set a harmless past-date trigger to avoid validation error
+                    $pastTrigger = New-ScheduledTaskTrigger -Once -At "01/01/1970"
+                    Set-ScheduledTask -TaskPath $wauTask.TaskPath -TaskName $wauTask.TaskName -Trigger $pastTrigger | Out-Null
+                }
             }
         }
     }
