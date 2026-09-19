@@ -80,22 +80,42 @@ catch {
     Exit 1
 }
 
-if (-not $pendingData.Apps -or @($pendingData.Apps).Count -eq 0) {
+if (-not $pendingData.Apps -or $pendingData.Apps.Count -eq 0) {
     Write-ToLog "pending-updates.json contains no apps -- nothing to update" "Cyan"
     Remove-Item -Path $JsonPath -Force -ErrorAction SilentlyContinue
     Exit 0
 }
 
-Write-ToLog "$(@($pendingData.Apps).Count) apps queued for update"
+Write-ToLog "$($pendingData.Apps.Count) apps queued for update"
 #endregion READ PENDING UPDATES
 
 #region PROCESS UPDATES
 $Script:InstallOK = 0
 $DeadlineRegBase  = "HKLM:\SOFTWARE\Romanitho\Winget-AutoUpdate\UpdateDeadlines"
 
-# Split apps by scope -- user-scoped apps must be updated in user context.
-$machineApps = @($pendingData.Apps | Where-Object { $_.Scope -ne 'user' })
-$userApps    = @($pendingData.Apps | Where-Object { $_.Scope -eq 'user' })
+# Split apps by scope -- re-verify if any user-tagged apps are actually installed
+# machine-wide (in Program Files or HKLM). These are updated by SYSTEM with full
+# administrative elevation, preventing unwanted UAC prompts.
+$resolvedMachineApps = [System.Collections.Generic.List[PSObject]]::new()
+$resolvedUserApps    = [System.Collections.Generic.List[PSObject]]::new()
+
+foreach ($app in @($pendingData.Apps)) {
+    if ($app.Scope -eq 'user') {
+        if (Test-IsMachineApp -AppId $app.Id -AppName $app.Name) {
+            Write-ToLog "$($app.Name) : promoted to machine scope (installed in Program Files / HKLM) -- updating via SYSTEM" "Cyan"
+            $app.Scope = 'machine'
+            $resolvedMachineApps.Add($app)
+        }
+        else {
+            $resolvedUserApps.Add($app)
+        }
+    }
+    else {
+        $resolvedMachineApps.Add($app)
+    }
+}
+$machineApps = @($resolvedMachineApps)
+$userApps    = @($resolvedUserApps)
 
 if ($machineApps.Count -gt 0) {
     Write-ToLog "$($machineApps.Count) machine-scoped apps to update"
@@ -126,7 +146,7 @@ if ($userApps.Count -gt 0) {
         if (-not (Test-Path $userUpdateDir)) { New-Item -ItemType Directory -Path $userUpdateDir -Force | Out-Null }
         $userUpdatePath = [System.IO.Path]::Combine($userUpdateDir, 'user-context-update.json')
         try {
-            ConvertTo-Json -InputObject @($userApps) -Depth 3 | Set-Content -Path $userUpdatePath -Encoding UTF8 -Force
+            $userApps | ConvertTo-Json -Depth 3 | Set-Content -Path $userUpdatePath -Encoding UTF8 -Force
             Write-ToLog "$($userApps.Count) user-scoped apps written to user-context-update.json"
 
             $userContextTask = Get-ScheduledTask -TaskName 'Winget-AutoUpdate-UserContext' -ErrorAction SilentlyContinue
