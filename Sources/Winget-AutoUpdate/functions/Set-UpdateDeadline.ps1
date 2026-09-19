@@ -25,7 +25,6 @@ function Set-UpdateDeadline {
         [PSCustomObject]$App,
 
         [Parameter(Mandatory = $true)]
-        [Alias('DeadlineDays')]
         [int]$DeadlineHours
     )
 
