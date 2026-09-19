@@ -31,13 +31,27 @@ You can also download the latest release of the add-on [WAU Settings GUI (for Wi
 
 ## Configurations
 ### Keep some apps out of Winget-AutoUpdate
-- #### BlockList
-You can exclude apps from update job (for instance, apps you want to keep at a specific version or apps with built-in auto-update):
-Add (or remove) the apps' ID you want to disable autoupdate to 'excluded_apps.txt'. (File must be placed in the same folder as WAU.msi).
-- #### AllowList
-You can update only pre-selected apps. To do so, create an "included_apps.txt" with the apps' ID of the apps you want to auto-update and place it in the same folder as WAU.msi during install.
+WAU supports two mutually exclusive list modes. Blocklist (default - excluded_apps.txt) and Allowlist (included_apps.txt). 
+- Each list should be one winget package ID per line (not the app name or display string - use the ID from `winget list` or `winget search`).
+- Each list can contain wildcards (*). For instance `Mozilla.Firefox*` will match all Firefox variants.
 
-> The lists can contain Wildcard (*). For instance ```Mozilla.Firefox*``` will take care of all Firefox channels.
+#### BlockList
+You can exclude apps from the update job (for instance, apps you want to keep at a specific version or apps with built-in auto-update).
+WAU supports **Mix & Match** exclusions: if multiple sources are present, they are automatically merged and deduplicated:
+- **Group Policy (GPO)**: Defined by administrators under `HKLM:\SOFTWARE\Policies\Romanitho\Winget-AutoUpdate\BlackList`.
+- **Machine Admin File**: Place `excluded_apps.txt` in the WAU install folder (e.g. `C:\Program Files\Winget-AutoUpdate\excluded_apps.txt`).
+- **User Profile File (Non-Admin)**: Standard users can manage their own exclusions in their personal user profile at `%LocalAppData%\Winget-AutoUpdate\excluded_apps.txt` (or `%UserProfile%\excluded_apps.txt`). This requires no administrator privileges or permission changes.
+- **Default Fallback**: If no custom exclusions exist across GPO, machine, or user files, WAU automatically falls back to `config\default_excluded_apps.txt`.
+- Empty lines and lines starting with `#` are treated as comments and ignored.
+- It is not recommended to edit `config\default_excluded_apps.txt` directly as it may be overwritten on WAU app updates.
+
+#### AllowList
+You can update only pre-selected apps by enabling allowlist mode.
+- Set WAU_UseWhiteList=1 in the WAU configuration registry key under `HKLM:\SOFTWARE\Romanitho\Winget-AutoUpdate`
+- On 64-bit Windows WAU may also consider the 32-bit registry view `HKLM:\SOFTWARE\WOW6432Node\Romanitho\Winget-AutoUpdate`
+- Place `included_apps.txt` in the WAU install folder (for example `C:\Program Files\Winget-AutoUpdate\included_apps.txt`)
+
+If allowlist mode is enabled, WAU reads `included_apps.txt` and ignores `excluded_apps.txt`. Otherwise, WAU ignores `included_apps.txt`.
 
 List and Mods folder content will be copied to WAU install location:  
 <img width="474" height="308" alt="423074783-a37837b0-b61e-4ce7-b23c-fd8661585e40" src="https://github.com/user-attachments/assets/323fc50c-2400-4fa2-937d-83a0f0c2392d" />
@@ -50,10 +64,10 @@ You can choose which notification will be displayed: `Full`, `Success only`, `Er
 You can easily translate toast notifications by creating your locale xml config file (and share it with us 😉).
 
 ### When does the script run?
-WAU runs ,by default, at logon. You can configure the frequency with options (Daily, BiDaily, Weekly, BiWeekly, Monthly or Never).
+WAU runs by default, at logon. You can configure the frequency with options (Daily, BiDaily, Weekly, BiWeekly, Monthly or Never).
 
 ### Log location
-You can find logs in install location, in logs folder for priviledged executions. For user runs (Winget-Install.ps1) a log file will be created at %AppData%\Winget-AutoUpdate\Logs .<br>
+You can find logs in install location, in logs folder for privileged executions. For user runs (Winget-Install.ps1) a log file will be created at %AppData%\Winget-AutoUpdate\Logs .<br>
 If **Intune Management Extension** is installed, a **SymLink** (WAU-updates.log) is created under **C:\ProgramData\Microsoft\IntuneManagementExtension\Logs**<br>
 If you are deploying winget Apps with [Winget-Install](https://github.com/Romanitho/Winget-AutoUpdate/blob/main/Sources/Winget-AutoUpdate/Winget-Install.ps1) a **SymLink** (WAU-install.log & WAU-user_%username%.log) is also created under **C:\ProgramData\Microsoft\IntuneManagementExtension\Logs**
 
@@ -63,6 +77,12 @@ As explained in this [post](https://github.com/microsoft/winget-cli/issues/1255)
 ![image](https://user-images.githubusercontent.com/96626929/155092000-c774979d-2db7-4dc6-8b7c-bd11c7643950.png)
 
 Eventually, try to reinstall or update app manually to see if new version is detected.
+
+### Package Deferral (Delay updates)
+You can postpone package updates by a configured number of days after their official release in `microsoft/winget-pkgs`:
+- **Global Deferral:** Configure `DEFERRALDAYS=X` during install, in Group Policy, or in the registry (`WAU_DeferralDays`).
+- **Per-App Overrides:** Place `<AppID>-deferral.txt` in the `mods` folder with the desired number of days (e.g., `0` to exempt an app from global deferral, or `14` to postpone it longer).
+- **Smart Caching:** Resolved release dates are cached locally (`cache\deferral_cache.json`) to prevent repeated GitHub API calls and preserve rate limits.
 
 ### Handle metered connections
 
@@ -178,6 +198,33 @@ Setting it to 1 keeps the original one and just let it grow.
 ### MAXLOGSIZE
 Specify the size of the log file in bytes before rotating.<br>
 Default is 1048576 = 1 MB (ca. 7500 lines)
+
+### DEFERRALDAYS
+Default value 0 (disabled). Specify the number of days to postpone package updates after their release in `microsoft/winget-pkgs`.<br>
+Example: `DEFERRALDAYS=7` will delay package upgrades until 7 days after the version was merged.
+Individual apps can override this setting using `mods\<AppID>-deferral.txt`.
+
+### GITHUBTOKEN
+Optional GitHub Personal Access Token to raise the API rate limit from 60 to 5,000 requests/hour when checking package release dates. Can also be configured via Group Policy or `$env:GITHUB_TOKEN`.
+
+### SHAREDCACHEPATH
+Specify a central network share folder (e.g. `\\server\share\wau\cache`) to enable decentralized peer-to-peer caching for package deferrals across corporate networks. The first client resolving an update release date saves it to the share; all other clients read from the share without querying GitHub, preventing API rate limit issues. If unreachable (e.g. laptop off VPN), clients automatically fall back to their local cache.
+
+### UPDATEDEADLINEHOURS
+Default value 8 (hours, representing a standard workday). Specify the number of hours from first detection until pending updates are forced silently in the background.<br>
+When set to a value greater than 0, WAU will display an update prompt dialog to logged-in users instead of immediately and silently updating apps. The user can choose "Update Now" or "Remind Me in X hours". Once the deadline is reached, updates are forced automatically.
+
+### UPDATEDEADLINEDAYS (Legacy)
+Default value 0 (disabled). Specify the number of days from first detection until pending updates are forced silently in the background. If `UPDATEDEADLINEHOURS` is configured, it takes precedence.
+
+### COMPANYNAME
+Optional company name to display in the deadline prompt dialog header (e.g. "Contoso requires the following updates to be installed"). Default is "Your organization".
+
+### REMINDERINTERVALHOURS
+Default value 2 (hours). Number of hours to wait before re-displaying the deadline prompt dialog after a user dismisses it with "Remind Me". Only active when update deadline enforcement is configured (> 0).
+
+### REMINDERINTERVALDAYS (Legacy)
+Default value 2. Number of days to wait before re-displaying the deadline prompt dialog after a user dismisses it with "Remind Me". If `REMINDERINTERVALHOURS` is configured, it takes precedence.
 
 ### INSTALLDIR
 Specify Winget-AutoUpdate installation location. Default: `C:\Program Files\Winget-AutoUpdate` (Recommended to leave default).
