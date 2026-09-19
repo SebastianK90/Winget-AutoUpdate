@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <policyDefinitions xmlns:xsd="http://www.w3.org/2001/XMLSchema"
-  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" revision="5.2"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" revision="5.3"
   schemaVersion="1.0" xmlns="http://www.microsoft.com/GroupPolicy/PolicyDefinitions">
   <policyNamespaces>
     <target prefix="WAU" namespace="Romanitho.Policies.WAU" />
@@ -11,6 +11,7 @@
       <definition name="SUPPORTED_WAU_1_16_0" displayName="$(string.SUPPORTED_WAU_1_16_0)" />
       <definition name="SUPPORTED_WAU_1_16_5" displayName="$(string.SUPPORTED_WAU_1_16_5)" />
       <definition name="SUPPORTED_WAU_2_6_0" displayName="$(string.SUPPORTED_WAU_2_6_0)" />
+      <definition name="SUPPORTED_WAU_3_0_0" displayName="$(string.SUPPORTED_WAU_3_0_0)" />
       <definition name="SUPPORTED_WAU_EXPERIMENTAL"
         displayName="$(string.SUPPORTED_WAU_EXPERIMENTAL)" />
     </definitions>
@@ -410,6 +411,94 @@
       <supportedOn ref="WAU:SUPPORTED_WAU_2_6_0" />
       <elements>
         <text id="UpdatesTimeDelayTime" valueName="WAU_UpdatesTimeDelay" />
+      </elements>
+    </policy>
+    <policy name="DeferralDays_Enable" class="Machine"
+      displayName="$(string.DeferralDays_Name)"
+      explainText="$(string.DeferralDays_Explain)"
+      key="Software\Policies\Romanitho\Winget-AutoUpdate"
+      presentation="$(presentation.DeferralDays)">
+      <parentCategory ref="WAU" />
+      <supportedOn ref="WAU:SUPPORTED_WAU_2_6_0" />
+      <elements>
+        <text id="DeferralDays" valueName="WAU_DeferralDays" />
+      </elements>
+    </policy>
+    <policy name="GitHubToken_Enable" class="Machine"
+      displayName="$(string.GitHubToken_Name)"
+      explainText="$(string.GitHubToken_Explain)"
+      key="Software\Policies\Romanitho\Winget-AutoUpdate"
+      presentation="$(presentation.GitHubToken)">
+      <parentCategory ref="WAU" />
+      <supportedOn ref="WAU:SUPPORTED_WAU_2_6_0" />
+      <elements>
+        <text id="GitHubToken" valueName="WAU_GitHubToken" />
+      </elements>
+    </policy>
+    <policy name="SharedCachePath_Enable" class="Machine"
+      displayName="$(string.SharedCachePath_Name)"
+      explainText="$(string.SharedCachePath_Explain)"
+      key="Software\Policies\Romanitho\Winget-AutoUpdate"
+      presentation="$(presentation.SharedCachePath)">
+      <parentCategory ref="WAU" />
+      <supportedOn ref="WAU:SUPPORTED_WAU_2_6_0" />
+      <elements>
+        <text id="SharedCachePath" valueName="WAU_SharedCachePath" />
+      </elements>
+    </policy>
+    <policy name="UpdateDeadlineHours_Enable" class="Machine"
+      displayName="$(string.UpdateDeadlineHours_Name)"
+      explainText="$(string.UpdateDeadlineHours_Explain)"
+      key="Software\Policies\Romanitho\Winget-AutoUpdate"
+      presentation="$(presentation.UpdateDeadlineHours)">
+      <parentCategory ref="WAU" />
+      <supportedOn ref="WAU:SUPPORTED_WAU_3_0_0" />
+      <elements>
+        <text id="UpdateDeadlineHours" valueName="WAU_UpdateDeadlineHours" />
+      </elements>
+    </policy>
+    <policy name="UpdateDeadlineDays_Enable" class="Machine"
+      displayName="$(string.UpdateDeadlineDays_Name)"
+      explainText="$(string.UpdateDeadlineDays_Explain)"
+      key="Software\Policies\Romanitho\Winget-AutoUpdate"
+      presentation="$(presentation.UpdateDeadlineDays)">
+      <parentCategory ref="WAU" />
+      <supportedOn ref="WAU:SUPPORTED_WAU_3_0_0" />
+      <elements>
+        <text id="UpdateDeadlineDays" valueName="WAU_UpdateDeadlineDays" />
+      </elements>
+    </policy>
+    <policy name="CompanyName_Enable" class="Machine"
+      displayName="$(string.CompanyName_Name)"
+      explainText="$(string.CompanyName_Explain)"
+      key="Software\Policies\Romanitho\Winget-AutoUpdate"
+      presentation="$(presentation.CompanyName)">
+      <parentCategory ref="WAU" />
+      <supportedOn ref="WAU:SUPPORTED_WAU_3_0_0" />
+      <elements>
+        <text id="CompanyName" valueName="WAU_CompanyName" />
+      </elements>
+    </policy>
+    <policy name="ReminderIntervalHours_Enable" class="Machine"
+      displayName="$(string.ReminderIntervalHours_Name)"
+      explainText="$(string.ReminderIntervalHours_Explain)"
+      key="Software\Policies\Romanitho\Winget-AutoUpdate"
+      presentation="$(presentation.ReminderIntervalHours)">
+      <parentCategory ref="WAU" />
+      <supportedOn ref="WAU:SUPPORTED_WAU_3_0_0" />
+      <elements>
+        <text id="ReminderIntervalHours" valueName="WAU_ReminderIntervalHours" />
+      </elements>
+    </policy>
+    <policy name="ReminderIntervalDays_Enable" class="Machine"
+      displayName="$(string.ReminderIntervalDays_Name)"
+      explainText="$(string.ReminderIntervalDays_Explain)"
+      key="Software\Policies\Romanitho\Winget-AutoUpdate"
+      presentation="$(presentation.ReminderIntervalDays)">
+      <parentCategory ref="WAU" />
+      <supportedOn ref="WAU:SUPPORTED_WAU_3_0_0" />
+      <elements>
+        <text id="ReminderIntervalDays" valueName="WAU_ReminderIntervalDays" />
       </elements>
     </policy>
   </policies>
