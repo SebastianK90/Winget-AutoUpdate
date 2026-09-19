@@ -12,9 +12,9 @@
 
     The JSON payload format:
         {
-          "Config": { "ReminderIntervalDays": 2 },
+          "Config": { "ReminderIntervalHours": 2, "ReminderIntervalDays": 1, "CompanyName": "" },
           "Apps": [
-            { "Name": "...", "Id": "...", "Version": "...", "AvailableVersion": "...", "Deadline": "yyyy-MM-dd" },
+            { "Name": "...", "Id": "...", "Version": "...", "AvailableVersion": "...", "Deadline": "yyyy-MM-dd HH:mm:ss" },
             ...
           ]
         }
@@ -25,13 +25,13 @@
         Id               [string] - Winget package identifier
         Version          [string] - Currently installed version
         AvailableVersion [string] - Available version to install
-        Deadline         [string] - Deadline date as "yyyy-MM-dd" string
+        Deadline         [string] - Deadline date as "yyyy-MM-dd HH:mm:ss" string
 
     The caller is responsible for enriching deadline entries with Name and Version
     from the Get-WingetOutdatedApps result before calling this function.
 
-.PARAMETER ReminderIntervalDays
-    Number of days to snooze when the user dismisses the dialog.
+.PARAMETER ReminderIntervalHours
+    Number of hours to snooze when the user dismisses the dialog.
     Written into the JSON Config envelope so the prompt script does not
     need to independently re-read WAU configuration.
 #>
@@ -42,7 +42,6 @@ function Start-UpdatePromptTask {
         [array]$PendingApps,
 
         [Parameter(Mandatory = $true)]
-        [Alias('ReminderIntervalDays')]
         [int]$ReminderIntervalHours,
 
         [Parameter(Mandatory = $false)]
