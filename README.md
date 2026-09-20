@@ -157,6 +157,12 @@ For **AzureBlob**: This requires the parameter **-AzureBlobURL** to be set with 
 Used in conjunction with the **-ModsPath** parameter to provide the Azure Storage Blob URL with SAS token. The SAS token must, at a minimum, have 'Read' and 'List' permissions. It is recommended to set the permisions at the container level and rotate the SAS token on a regular basis. Ensure the container reflects the same structure as found under the initial `mods` folder.
 
 ### USERCONTEXT
+
+Local scoped-update build: the deadline GUI always scans both the machine and
+the user of its desktop session. `USERCONTEXT` continues to control the classic
+silent user task when deadline mode is disabled. See [SCOPED-UPDATES.md](SCOPED-UPDATES.md)
+for scope preservation, explicit user-to-machine consent, installation and tests.
+
 Default value 0. Set `USERCONTEXT=1` to install WAU with system and **user** context executions.<br>
 Applications installed in system context will be ignored under user context.
 

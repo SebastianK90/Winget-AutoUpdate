@@ -262,6 +262,12 @@ function Test-PackageDeferral {
         $remainingDays = [Math]::Round($deferralDays - $ageDays, 1)
         $deferUntil = $releaseDateUtc.AddDays($deferralDays).ToLocalTime().ToString("yyyy-MM-dd HH:mm")
         $releaseStr = $releaseDateUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm")
+        if ($App) {
+            $App | Add-Member NoteProperty DeferUntil $deferUntil -Force
+            $App | Add-Member NoteProperty ReleaseDate $releaseStr -Force
+            $App | Add-Member NoteProperty DeferralDays $deferralDays -Force
+            $App | Add-Member NoteProperty DeferralRemainingDays $remainingDays -Force
+        }
         Write-ToLog "$($App.Name) : Upgrade to v$($App.AvailableVersion) is deferred ($remainingDays days remaining, until $deferUntil). Released on $releaseStr ($([Math]::Round($ageDays, 1)) days ago, policy: $deferralDays days$modNotice)." "DarkYellow"
         return $true
     }

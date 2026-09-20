@@ -45,7 +45,9 @@ function Start-UpdatePromptTask {
         [int]$ReminderIntervalHours,
 
         [Parameter(Mandatory = $false)]
-        [string]$CompanyName = ''
+        [string]$CompanyName = '',
+        [string]$UserSid = '',
+        [bool]$InventoryComplete = $true
     )
 
     $ConfigDir = Join-Path $WAUConfig.InstallLocation "config"
@@ -58,12 +60,14 @@ function Start-UpdatePromptTask {
             ReminderIntervalHours = $ReminderIntervalHours
             ReminderIntervalDays  = [math]::Max(1, [int][math]::Round($ReminderIntervalHours / 24))
             CompanyName           = $CompanyName
+            UserSid               = $UserSid
+            InventoryComplete     = $InventoryComplete
         }
         Apps = @($PendingApps)
     }
 
     try {
-        $payload | ConvertTo-Json -Depth 3 | Set-Content -Path $JsonPath -Encoding UTF8 -Force
+        Write-WauAtomicJson -Path $JsonPath -Value $payload
         Write-ToLog "Pending updates written: $($PendingApps.Count) apps - $JsonPath"
     }
     catch {
@@ -84,6 +88,16 @@ function Start-UpdatePromptTask {
         }
     }
     else {
-        Write-ToLog "WARNING: Winget-AutoUpdate-UpdatePrompt task not found -- update prompt will not be shown" "Yellow"
+        # File-only deployments do not register the helper task. The main process
+        # already runs as SYSTEM in the interactive session through ServiceUI.
+        try {
+            $promptCommand = "& '$([System.IO.Path]::Combine($Script:WorkingDir, 'WAU-UpdatePrompt.ps1'))'"
+            $encodedPrompt = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($promptCommand))
+            Start-Process -FilePath "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" `
+                -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Sta -WindowStyle Hidden -EncodedCommand $encodedPrompt" `
+                -WorkingDirectory $Script:WorkingDir -ErrorAction Stop
+            Write-ToLog 'UpdatePrompt helper task missing; prompt launched directly.' 'Yellow'
+        }
+        catch { Write-ToLog "ERROR: Update prompt could not be launched: $($_.Exception.Message)" 'Red' }
     }
 }

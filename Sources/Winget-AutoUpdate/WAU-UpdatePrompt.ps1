@@ -59,6 +59,9 @@ using System.Runtime.InteropServices;
 public class WauAppRow {
     public bool   IsSelected           { get; set; }
     public string Id                   { get; set; }
+    public string Key                  { get; set; }
+    public string ScopeDisplay         { get; set; }
+    public bool CanUpdate              { get; set; }
     public string Name                 { get; set; }
     public string AvailableVersion     { get; set; }
     public string DeadlineDisplay      { get; set; }
@@ -71,6 +74,8 @@ public class WauAppRow {
     public string BadgeBorder          { get; set; }
     public string RowBackground        { get; set; }
     public string RowBorder            { get; set; }
+    public string BlockReason          { get; set; }
+    public string BlockTooltip         { get; set; }
 }
 
 public class NativeThemeHelper {
@@ -138,6 +143,8 @@ $isDarkMode = if ($DarkMode) { $true } elseif ($LightMode) { $false } else { Get
 
 #region READ PENDING UPDATES
 $JsonPath = [System.IO.Path]::Combine($PSScriptRoot, 'config', 'pending-updates.json')
+. "$PSScriptRoot\functions\Scope-Updates.ps1"
+$Script:WorkingDir = $PSScriptRoot
 
 if (-not (Test-Path $JsonPath)) {
     Exit 0
@@ -176,6 +183,8 @@ if ($pendingData.Config -and $pendingData.Config.CompanyName) {
 #endregion READ PENDING UPDATES
 
 #region BUILD ROW OBJECTS
+# Do not show another session's user inventory or collect consent in that session.
+if (-not $pendingData.Config.UserSid -or (Get-WauInteractiveUser) -ne $pendingData.Config.UserSid) { Exit 1 }
 $now = Get-Date
 $appRows = [System.Collections.Generic.List[WauAppRow]]::new()
 [string[]]$dateFormats = @('yyyy-MM-dd HH:mm:ss', 'yyyy-MM-ddTHH:mm:ss', 'yyyy-MM-dd HH:mm', 'yyyy-MM-dd')
@@ -192,10 +201,17 @@ foreach ($app in @($pendingData.Apps)) {
     $minutesLeft = $timeSpan.TotalMinutes
 
     $row = [WauAppRow]::new()
-    $row.IsSelected       = ($hoursLeft -le 0)
+    $row.CanUpdate        = $app.CanUpdate -eq $true
+    $row.IsSelected       = ($hoursLeft -le 0 -and $row.CanUpdate -and -not $app.RequiresScopeMigration)
     $row.Id               = $app.Id
+    $row.Key              = $app.Key
+    $row.ScopeDisplay     = if ($app.Scope -eq 'user') { 'User' } else { 'Machine' }
+    if ($app.RequiresScopeMigration) { $row.ScopeDisplay += ' -> Machine (consent required)' }
+    if ($app.BlockReason) { $row.ScopeDisplay += " | $($app.BlockReason)" }
+    if ($app.Version -eq 'Unknown') { $row.ScopeDisplay += ' | installed version unknown' }
     $row.Name             = $app.Name
     $row.AvailableVersion = $app.AvailableVersion
+    $row.BlockReason      = if ($app.BlockReason) { [string]$app.BlockReason } else { '' }
 
     # DeadlineDisplay (Required By)
     if ($deadline.Date -eq $now.Date) {
@@ -250,19 +266,65 @@ foreach ($app in @($pendingData.Apps)) {
 
     $row.DaysRemainingValue = $hoursLeft
     $row.IsUrgent           = ($hoursLeft -le 8)
-    $row.IsFinalDay         = ($hoursLeft -le 0)
+    $row.IsFinalDay         = ($hoursLeft -le 0 -and $row.CanUpdate -and -not $app.RequiresScopeMigration)
+    if (-not $row.CanUpdate) {
+        $deferUntilStr = if ($app.DeferUntil) {
+            [string]$app.DeferUntil
+        } elseif ($app.BlockReason -match 'until\s+([\d\-]+(\s+[\d\:]+)?)') {
+            $matches[1]
+        } else {
+            $null
+        }
+
+        if ($deferUntilStr) {
+            try {
+                $deferDate = [DateTime]::ParseExact($deferUntilStr, @('yyyy-MM-dd HH:mm', 'yyyy-MM-dd HH:mm:ss', 'yyyy-MM-ddTHH:mm:ss'), [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None)
+                if ($deferDate.Date -eq $now.Date) {
+                    $row.DeadlineDisplay = "Until today, $($deferDate.ToString('HH:mm'))"
+                } elseif ($deferDate.Date -eq $now.Date.AddDays(1)) {
+                    $row.DeadlineDisplay = "Until tomorrow, $($deferDate.ToString('HH:mm'))"
+                } else {
+                    $row.DeadlineDisplay = "Until $($deferDate.ToString('MMM d, HH:mm'))"
+                }
+            } catch {
+                $row.DeadlineDisplay = "Until $deferUntilStr"
+            }
+        } else {
+            $row.DeadlineDisplay = '-'
+        }
+
+        $row.DaysRemainingDisplay = 'Blocked'
+        $row.BadgeBackground = if ($isDarkMode) { '#283141' } else { '#F1F5F9' }
+        $row.BadgeForeground = if ($isDarkMode) { '#94A3B8' } else { '#475569' }
+        $row.BadgeBorder = if ($isDarkMode) { '#374357' } else { '#E2E8F0' }
+        $row.RowBackground = 'Transparent'
+        $row.RowBorder = if ($isDarkMode) { '#2D2D2D' } else { '#F3F4F6' }
+        $row.IsUrgent = $false
+
+        $tooltipLines = [System.Collections.Generic.List[string]]::new()
+        if ($app.BlockReason)  { $tooltipLines.Add("Status: $($app.BlockReason)") }
+        if ($deferUntilStr)    { $tooltipLines.Add("Deferred until: $deferUntilStr") }
+        if ($app.ReleaseDate)  { $tooltipLines.Add("Released: $($app.ReleaseDate)") }
+        if ($app.DeferralDays) { $tooltipLines.Add("Policy deferral: $($app.DeferralDays) days") }
+        $row.BlockTooltip = $tooltipLines -join "`n"
+    }
 
     $appRows.Add($row)
 }
 
-# Sort ascending so most urgent apps appear at the top
-$sortedRows = @($appRows | Sort-Object DaysRemainingValue)
+# Sort so non-blocked apps appear first (most urgent at the top), and blocked apps appear at the bottom
+$sortedRows = @($appRows | Sort-Object `
+    @{ Expression = { if ($_.CanUpdate) { 0 } else { 1 } } }, `
+    @{ Expression = { $_.DaysRemainingValue } }, `
+    @{ Expression = { $_.Name } }
+)
 
 # If no apps have deadlines, there is nothing to prompt for
 if ($sortedRows.Count -eq 0) { Exit 0 }
 
 $script:HasFinalDayApps = @($sortedRows | Where-Object { $_.IsFinalDay }).Count -gt 0
-$script:AllFinalDay     = @($sortedRows | Where-Object { -not $_.IsFinalDay }).Count -eq 0
+$updatableRows          = @($sortedRows | Where-Object CanUpdate)
+$script:AllFinalDay     = $updatableRows.Count -gt 0 -and @($updatableRows | Where-Object { -not $_.IsFinalDay }).Count -eq 0
 #endregion BUILD ROW OBJECTS
 
 #region THEME COLOR TOKENS
@@ -539,10 +601,57 @@ else {
                 </Setter.Value>
             </Setter>
         </Style>
+        <!-- Modern Filter CheckBox Style with Label -->
+        <Style x:Key="FilterCheckBox" TargetType="CheckBox">
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Foreground" Value="{DynamicResource Brush.TextSecondary}"/>
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="CheckBox">
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <Border x:Name="checkBorder"
+                                    Width="16"
+                                    Height="16"
+                                    CornerRadius="4"
+                                    Background="{DynamicResource Brush.CheckBoxBg}"
+                                    BorderBrush="{DynamicResource Brush.CheckBoxBorder}"
+                                    BorderThickness="1.5"
+                                    Margin="0,0,6,0">
+                                <Path x:Name="checkMark"
+                                      Data="M 2.5,7.5 L 6,11 L 13,3.5"
+                                      Stroke="{DynamicResource Brush.PrimaryBtnBg}"
+                                      StrokeThickness="2"
+                                      StrokeStartLineCap="Round"
+                                      StrokeEndLineCap="Round"
+                                      Visibility="Collapsed"
+                                      HorizontalAlignment="Center"
+                                      VerticalAlignment="Center"/>
+                            </Border>
+                            <ContentPresenter VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="checkMark" Property="Visibility" Value="Visible"/>
+                                <Setter TargetName="checkBorder" Property="BorderBrush" Value="{DynamicResource Brush.PrimaryBtnBg}"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="checkBorder" Property="BorderBrush" Value="{DynamicResource Brush.PrimaryBtnHover}"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="checkBorder" Property="Opacity" Value="0.35"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </Window.Resources>
 
     <Grid Margin="22,18,22,20">
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
@@ -578,12 +687,12 @@ else {
                                Height="28"
                                RenderOptions.BitmapScalingMode="HighQuality"/>
                         <Path Name="FallbackIcon"
-                              Width="22"
-                              Height="22"
-                              Stretch="Uniform"
-                              Fill="{DynamicResource Brush.PrimaryBtnBg}"
-                              Data="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"
-                              Visibility="Collapsed"/>
+                               Width="22"
+                               Height="22"
+                               Stretch="Uniform"
+                               Fill="{DynamicResource Brush.PrimaryBtnBg}"
+                               Data="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"
+                               Visibility="Collapsed"/>
                     </Grid>
                 </Border>
 
@@ -603,8 +712,20 @@ else {
             </Grid>
         </Border>
 
+        <!-- Filter and Status Bar -->
+        <Grid Grid.Row="1" Margin="2,0,2,8" Name="FilterBar">
+            <TextBlock Name="ListSummaryText"
+                       FontSize="11"
+                       Foreground="{DynamicResource Brush.TextMuted}"
+                       VerticalAlignment="Center"/>
+            <CheckBox Name="ShowBlockedCheckBox"
+                      Style="{DynamicResource FilterCheckBox}"
+                      HorizontalAlignment="Right"
+                      VerticalAlignment="Center"/>
+        </Grid>
+
         <!-- App List Card -->
-        <Border Grid.Row="1"
+        <Border Grid.Row="2"
                 Background="{DynamicResource Brush.ListBg}"
                 BorderBrush="{DynamicResource Brush.ListBorder}"
                 BorderThickness="1"
@@ -624,8 +745,11 @@ else {
                                 <DataTemplate>
                                     <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}">
                                         <CheckBox.Style>
-                                            <Style TargetType="CheckBox" BasedOn="{StaticResource {x:Type CheckBox}}">
+                                             <Style TargetType="CheckBox" BasedOn="{StaticResource {x:Type CheckBox}}">
                                                 <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding CanUpdate}" Value="False">
+                                                        <Setter Property="IsEnabled" Value="False"/>
+                                                    </DataTrigger>
                                                     <DataTrigger Binding="{Binding IsFinalDay}" Value="True">
                                                         <Setter Property="IsEnabled" Value="False"/>
                                                     </DataTrigger>
@@ -641,12 +765,17 @@ else {
                         <GridViewColumn Header="Application" Width="200">
                             <GridViewColumn.CellTemplate>
                                 <DataTemplate>
+                                    <StackPanel>
                                     <TextBlock Text="{Binding Name}"
                                                FontWeight="SemiBold"
                                                FontSize="12"
                                                Foreground="{DynamicResource Brush.TextPrimary}"
                                                VerticalAlignment="Center"
                                                TextTrimming="CharacterEllipsis"/>
+                                    <TextBlock Text="{Binding ScopeDisplay}" FontSize="10"
+                                               Foreground="{DynamicResource Brush.TextSecondary}"
+                                               TextWrapping="Wrap"/>
+                                    </StackPanel>
                                 </DataTemplate>
                             </GridViewColumn.CellTemplate>
                         </GridViewColumn>
@@ -659,7 +788,7 @@ else {
                                                FontSize="12"
                                                Foreground="{DynamicResource Brush.TextSecondary}"
                                                VerticalAlignment="Center"/>
-                                </DataTemplate>
+                                 </DataTemplate>
                             </GridViewColumn.CellTemplate>
                         </GridViewColumn>
 
@@ -684,6 +813,7 @@ else {
                                             BorderThickness="1"
                                             CornerRadius="10"
                                             Padding="8,3"
+                                            ToolTip="{Binding BlockTooltip}"
                                             HorizontalAlignment="Left"
                                             VerticalAlignment="Center">
                                         <TextBlock Text="{Binding DaysRemainingDisplay}"
@@ -700,7 +830,7 @@ else {
         </Border>
 
         <!-- Footer Area -->
-        <Grid Grid.Row="2">
+        <Grid Grid.Row="3">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
@@ -764,6 +894,9 @@ $headerTxt        = $window.FindName('HeaderText')
 $instructionTxt   = $window.FindName('InstructionText')
 $headerIconCtrl   = $window.FindName('HeaderIcon')
 $fallbackIconCtrl = $window.FindName('FallbackIcon')
+$filterBarCtrl    = $window.FindName('FilterBar')
+$listSummaryTxt   = $window.FindName('ListSummaryText')
+$showBlockedCb    = $window.FindName('ShowBlockedCheckBox')
 
 # Set header text with company name if configured
 if ($companyName) {
@@ -787,6 +920,9 @@ else {
     $instructionTxt.Text = "Check the box next to apps you're ready to update now, or update all at once. If you don't update all apps now, you will be reminded in $reminderHours $hourLabel."
 }
 
+if ($pendingData.Config.InventoryComplete -eq $false) {
+    $instructionTxt.Text = 'Benutzerabfrage fehlgeschlagen oder Zeitlimit erreicht. Die Liste ist unvollstaendig; bitte WAU erneut starten.'
+}
 # Set window and header icon from WAU's notify_icon.png if available
 $iconPath = Join-Path $PSScriptRoot 'icons\notify_icon.png'
 if (Test-Path $iconPath) {
@@ -816,14 +952,59 @@ else {
 # Set button label with configured interval
 $remindBtn.Content = "Remind Me in $reminderHours $hourLabel"
 
-# Populate the ListView
-$appListCtrl.ItemsSource = $sortedRows
+# Setup Filter and Populate the ListView
+$blockedCount   = @($sortedRows | Where-Object { -not $_.CanUpdate }).Count
+$updatableCount = @($sortedRows | Where-Object { $_.CanUpdate }).Count
+
+if ($blockedCount -eq 0) {
+    if ($showBlockedCb) { $showBlockedCb.Visibility = [System.Windows.Visibility]::Collapsed }
+    if ($listSummaryTxt) { $listSummaryTxt.Text = "$updatableCount update$(if ($updatableCount -ne 1) { 's' }) ready" }
+    $appListCtrl.ItemsSource = $sortedRows
+}
+elseif ($updatableCount -eq 0) {
+    if ($showBlockedCb) {
+        $showBlockedCb.Content = "Show blocked ($blockedCount)"
+        $showBlockedCb.IsChecked = $true
+    }
+    if ($listSummaryTxt) { $listSummaryTxt.Text = "$blockedCount update$(if ($blockedCount -ne 1) { 's' }) blocked / deferred" }
+    $appListCtrl.ItemsSource = $sortedRows
+}
+else {
+    if ($showBlockedCb) {
+        $showBlockedCb.Content = "Show blocked ($blockedCount)"
+        $showBlockedCb.IsChecked = $false
+    }
+    if ($listSummaryTxt) { $listSummaryTxt.Text = "$updatableCount update$(if ($updatableCount -ne 1) { 's' }) ready ($blockedCount blocked hidden)" }
+    $appListCtrl.ItemsSource = @($sortedRows | Where-Object CanUpdate)
+}
 #endregion WINDOW SETUP
 
 #region INTERACTION LOGIC
 # Tracks the user's chosen action. Defaults to Remind for safety.
 $script:Action     = 'Remind'
 $script:AllowClose = $false
+
+$script:ApplyFilter = {
+    $showBlocked = if ($showBlockedCb) { $showBlockedCb.IsChecked -eq $true } else { $true }
+    if ($showBlocked) {
+        $appListCtrl.ItemsSource = $sortedRows
+        if ($listSummaryTxt -and $blockedCount -gt 0 -and $updatableCount -gt 0) {
+            $listSummaryTxt.Text = "$updatableCount ready, $blockedCount blocked"
+        }
+    }
+    else {
+        $appListCtrl.ItemsSource = @($sortedRows | Where-Object CanUpdate)
+        if ($listSummaryTxt -and $blockedCount -gt 0 -and $updatableCount -gt 0) {
+            $listSummaryTxt.Text = "$updatableCount update$(if ($updatableCount -ne 1) { 's' }) ready ($blockedCount blocked hidden)"
+        }
+    }
+    & $script:UpdateButtonState
+}
+
+if ($showBlockedCb) {
+    $showBlockedCb.Add_Checked({ & $script:ApplyFilter })
+    $showBlockedCb.Add_Unchecked({ & $script:ApplyFilter })
+}
 
 # Block the X button -- users must choose Remind or Update.
 # Button handlers set AllowClose before calling Close().
@@ -863,12 +1044,14 @@ $timer.Start()
 # Checkbox state tracking -- update button text and Remind availability
 # when any checkbox in the ListView is toggled.
 $script:UpdateButtonState = {
-    $selectedCount = @($sortedRows | Where-Object { $_.IsSelected }).Count
+    $selectedCount = @($sortedRows | Where-Object { $_.IsSelected -and $_.CanUpdate }).Count
+    $updatableCount = @($sortedRows | Where-Object CanUpdate).Count
+    $updateNowBtn.IsEnabled = $updatableCount -gt 0
     if ($selectedCount -eq 0) {
         $updateNowBtn.Content = 'Update Now'
         $remindBtn.IsEnabled = $true
     }
-    elseif ($selectedCount -eq $sortedRows.Count) {
+    elseif ($selectedCount -eq $updatableCount) {
         $updateNowBtn.Content = 'Update Now'
         $remindBtn.IsEnabled = $false
     }
@@ -972,42 +1155,82 @@ function Clear-WAUSnoozeTrigger {
 }
 
 if ($script:Action -eq 'UpdateNow') {
-    $selectedApps = @($sortedRows | Where-Object { $_.IsSelected })
-
-    # Partial update: some (but not all) apps selected via checkboxes.
-    # Rewrite pending-updates.json with only selected apps so UpdateNow
-    # processes just those. Write NextPromptTime and schedule Once trigger for the remainder.
-    if ($selectedApps.Count -gt 0 -and $selectedApps.Count -lt $sortedRows.Count) {
-        $selectedIds  = @($selectedApps | ForEach-Object { $_.Id })
-        $filteredApps = @($pendingData.Apps | Where-Object { $_.Id -in $selectedIds })
-
-        $jsonOut = [ordered]@{
-            Config = $pendingData.Config
-            Apps   = $filteredApps
+    $selectedRows = @($sortedRows | Where-Object { $_.IsSelected -and $_.CanUpdate })
+    if ($selectedRows.Count -eq 0) { $selectedRows = @($sortedRows | Where-Object CanUpdate) }
+    $keys = @($selectedRows | ForEach-Object Key)
+    $chosen = @($pendingData.Apps | Where-Object { $_.Key -in $keys -and $_.CanUpdate })
+    $selectedUserApps = @($chosen | Where-Object Scope -eq 'user')
+    if ($selectedUserApps.Count -gt 0) {
+        try {
+            $Script:WingetSourceCustom = [string]$selectedUserApps[0].Source
+            if (-not $Script:WingetSourceCustom) { $Script:WingetSourceCustom = 'winget' }
+            $scopePlan = @(Invoke-WauUserOperation -Operation Plan -UserSid $pendingData.Config.UserSid -Apps $selectedUserApps -TimeoutSeconds 180)
+            foreach ($app in $selectedUserApps) {
+                $result = $scopePlan | Where-Object {
+                    $_.Key -eq $app.Key -and $_.Id -eq $app.Id -and $_.AvailableVersion -eq $app.AvailableVersion
+                } | Select-Object -First 1
+                if ($result -and $result.UserInstallerSupport -in @('Supported','Unavailable','Unknown') -and
+                    $result.MachineInstallerSupport -in @('Supported','Unavailable','Unknown')) {
+                    $app | Add-Member NoteProperty UserInstallerSupport ([string]$result.UserInstallerSupport) -Force
+                    $app | Add-Member NoteProperty MachineInstallerSupport ([string]$result.MachineInstallerSupport) -Force
+                    $null = Set-WauScopePlan -App $app -Source $app.Source
+                }
+            }
         }
-        $jsonOut | ConvertTo-Json -Depth 5 | Set-Content -Path $JsonPath -Encoding UTF8 -Force
-
-        # Remind for unselected apps: write registry & schedule one-shot trigger
-        Set-WAUSnoozeTrigger -Hours $reminderHours
-    }
-    else {
-        # Full update: rewrite pending-updates.json from in-memory data to guard against
-        # a race where the main SYSTEM cycle overwrites the file while the prompt is open.
-        $jsonOut = [ordered]@{
-            Config = $pendingData.Config
-            Apps   = $pendingData.Apps
+        catch {
+            # Preserve the installed user scope when the applicability check is
+            # inconclusive. Update-App will still require --scope user.
+            [System.Windows.MessageBox]::Show("Die Scope-Pruefung konnte nicht abgeschlossen werden. Benutzer-Updates bleiben im Benutzerkontext.`n`n$($_.Exception.Message)", 'WAU') | Out-Null
         }
-        $jsonOut | ConvertTo-Json -Depth 5 | Set-Content -Path $JsonPath -Encoding UTF8 -Force
-
-        # Clear any stale NextPromptTime and Once triggers
-        Clear-WAUSnoozeTrigger
     }
-
-    # Fire the UpdateNow task
-    $updateTask = Get-ScheduledTask -TaskName 'Winget-AutoUpdate-UpdateNow' -ErrorAction SilentlyContinue
-    if ($updateTask) {
-        $updateTask | Start-ScheduledTask
+    $approved = @(Select-WauApprovedUpdates -Apps $chosen -ConfirmMigration {
+        param($app)
+        $message = "$($app.Name) $($app.AvailableVersion) bietet laut WinGet keinen passenden Benutzer-Installer mehr, aber einen Machine-Installer.`n`nSoll die neue Version mit SYSTEM-Rechten fuer alle Benutzer installiert werden?`n`nDie bestehende Benutzerinstallation und deren Daten werden nicht automatisch entfernt. Je nach Hersteller koennen beide Installationen bestehen bleiben.`n`nJa: Machine-Installation freigeben.`nNein: Dieses Update ueberspringen; Benutzerinstallation beibehalten."
+        $answer = [System.Windows.MessageBox]::Show($message, 'Wechsel von User zu Machine bestaetigen',
+            [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question,
+            [System.Windows.MessageBoxResult]::No)
+        return $answer -eq [System.Windows.MessageBoxResult]::Yes
+    })
+    if ($approved.Count -gt 0) {
+        # Keep selection separate from inventory: a subsequent scan cannot replace
+        # the version-specific consent while UpdateNow is queued.
+        $requestPath = Join-Path $PSScriptRoot 'config\update-request.json'
+        $runningTask = Get-ScheduledTask -TaskName 'Winget-AutoUpdate-UpdateNow' -TaskPath '\WAU\' -ErrorAction SilentlyContinue
+        if ((Test-Path $requestPath) -or ($runningTask -and $runningTask.State -eq 'Running')) {
+            [System.Windows.MessageBox]::Show('Ein Updateauftrag wartet bereits auf die Verarbeitung. Bitte spaeter erneut versuchen.', 'WAU') | Out-Null
+        }
+        else {
+            Write-WauAtomicJson $requestPath ([pscustomobject]@{
+                RequestId=[guid]::NewGuid().ToString('N'); CreatedUtc=[datetime]::UtcNow.ToString('o')
+                UserSid=$pendingData.Config.UserSid; Apps=$approved
+            })
+            $updateTask = Get-ScheduledTask -TaskName 'Winget-AutoUpdate-UpdateNow' -TaskPath '\WAU\' -ErrorAction SilentlyContinue
+            if ($updateTask) {
+                try { $updateTask | Start-ScheduledTask -ErrorAction Stop }
+                catch {
+                    Remove-Item -LiteralPath $requestPath -ErrorAction SilentlyContinue
+                    [System.Windows.MessageBox]::Show("Updateauftrag konnte nicht gestartet werden: $_", 'WAU') | Out-Null
+                }
+            }
+            else {
+                # File-only deployments do not register UpdateNow. The prompt
+                # already has the SYSTEM token in the interactive session.
+                try {
+                    $updateCommand = "& '$([System.IO.Path]::Combine($PSScriptRoot, 'WAU-UpdateNow.ps1'))'"
+                    $encodedUpdate = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($updateCommand))
+                    Start-Process -FilePath "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" `
+                        -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand $encodedUpdate" `
+                        -WorkingDirectory $PSScriptRoot -ErrorAction Stop
+                }
+                catch {
+                    Remove-Item -LiteralPath $requestPath -ErrorAction SilentlyContinue
+                    [System.Windows.MessageBox]::Show("Updateauftrag konnte nicht gestartet werden: $_", 'WAU') | Out-Null
+                }
+            }
+        }
     }
+    if ($approved.Count -lt $pendingData.Apps.Count) { Set-WAUSnoozeTrigger -Hours $reminderHours }
+    else { Clear-WAUSnoozeTrigger }
 }
 elseif ($script:Action -eq 'Remind') {
     # Snooze -- record NextPromptTime in registry AND set a one-time trigger on Winget-AutoUpdate
@@ -1016,3 +1239,5 @@ elseif ($script:Action -eq 'Remind') {
 # SilentDismiss: no action taken, no NextPromptTime written.
 # Next WAU run will re-prompt with fresh data.
 #endregion ACT ON CHOICE
+
+

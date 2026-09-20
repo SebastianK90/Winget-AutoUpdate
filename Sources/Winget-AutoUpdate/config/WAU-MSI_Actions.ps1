@@ -172,7 +172,7 @@ function Install-WingetAutoUpdate {
         if ($InstallPath -notlike "$env:ProgramFiles*") {
             Write-Output "-> Securing functions and mods folders"
 
-            foreach ($dir in @("$InstallPath\functions", "$InstallPath\mods")) {
+            foreach ($dir in @($InstallPath, "$InstallPath\functions", "$InstallPath\mods", "$InstallPath\config")) {
                 try {
                     $dirPath = Get-Item -Path $dir
                     $acl = Get-Acl -Path $dirPath.FullName
