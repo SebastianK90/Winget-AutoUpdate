@@ -211,7 +211,9 @@ Example: `DEFERRALDAYS=7` will delay package upgrades until 7 days after the ver
 Individual apps can override this setting using `mods\<AppID>-deferral.txt`.
 
 ### GITHUBTOKEN
-Optional GitHub Personal Access Token to raise the API rate limit from 60 to 5,000 requests/hour when checking package release dates. Can also be configured via Group Policy or `$env:GITHUB_TOKEN`.
+Optional GitHub Personal Access Token to raise the API rate limit from 60 to 5,000 requests/hour when checking package release dates from the public `microsoft/winget-pkgs` repository. Can also be configured via Group Policy or `$env:GITHUB_TOKEN`.
+- **Fine-grained PAT (Recommended):** Set Repository access to "Public Repositories (read-only)". No additional permissions needed (or "Contents: Read-only").
+- **Classic PAT:** No scopes required! Leave all checkboxes unchecked (a token without scopes allows read-only access to public data and grants the 5,000 req/h rate limit without risking any private repository or write access).
 
 ### SHAREDCACHEPATH
 Specify a central network share folder (e.g. `\\server\share\wau\cache`) to enable decentralized peer-to-peer caching for package deferrals across corporate networks. The first client resolving an update release date saves it to the share; all other clients read from the share without querying GitHub, preventing API rate limit issues. If unreachable (e.g. laptop off VPN), clients automatically fall back to their local cache.

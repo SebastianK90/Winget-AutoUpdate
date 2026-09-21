@@ -164,7 +164,17 @@ If this policy is disabled or not configured, packages will not be deferred (def
       <string id="GitHubToken_Name">GitHub Personal Access Token (for Rate Limits)</string>
       <string id="GitHubToken_Explain">This policy setting specifies an optional GitHub Personal Access Token (PAT).
 
-A token increases the GitHub API rate limit from 60 requests per hour to 5,000 requests per hour, which is helpful when resolving package release dates across many applications.
+A token increases the GitHub API rate limit from 60 requests per hour to 5,000 requests per hour, which is helpful when resolving package release dates across many applications from the public 'microsoft/winget-pkgs' repository.
+
+Required Token Permissions:
+Because 'microsoft/winget-pkgs' is a public repository, minimal permissions are required:
+
+- Fine-grained Personal Access Token (Recommended):
+  * Repository access: Select "Public Repositories (read-only)".
+  * Repository permissions: No permissions required (or "Contents: Read-only").
+
+- Classic Personal Access Token (Tokens classic):
+  * Scopes: No scopes required! Leave all checkboxes unchecked. A classic token without any scopes selected grants the full 5,000 requests/hour for public data while following the principle of least privilege (no access to private repositories or write operations).
 
 If this policy is disabled or not configured, unauthenticated requests are used (or $env:GITHUB_TOKEN if defined).</string>
       <string id="SharedCachePath_Name">Central Network Share Cache Path for Deferrals</string>
