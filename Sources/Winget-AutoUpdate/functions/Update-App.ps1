@@ -21,7 +21,7 @@ Function Update-App ($app, $src = "winget") {
     $targetScope = $app.Scope
     $migration = $app.Scope -eq 'user' -and $app.TargetScope -eq 'machine'
     if ($migration) {
-        if ($app.ScopeMigrationApproved -ne $true -or -not $Script:IsSystem) {
+        if ($app.ScopeMigrationApproved -ne $true) {
             Write-ToLog "Scope migration not approved: $($app.Id)" 'Yellow'; return
         }
         if ((Get-WauInstallerSupport $app user $src) -ne 'Unavailable' -or
@@ -110,6 +110,9 @@ Function Update-App ($app, $src = "winget") {
     # Result notification
     if ($ConfirmInstall) {
         Write-ToLog "$($app.Name) updated to $($app.AvailableVersion)!" "Green"
+        if ($migration) {
+            Write-ToLog "Machine installation confirmed. Original user installation was retained: $($app.Id)" "Yellow"
+        }
         Start-NotifTask -Title ($NotifLocale.local.outputs.output[3].title -f $app.Name) `
             -Message ($NotifLocale.local.outputs.output[3].message -f $app.AvailableVersion) `
             -MessageType "success" -Balise $app.Name -Button1Action $ReleaseNoteURL -Button1Text $Button1Text

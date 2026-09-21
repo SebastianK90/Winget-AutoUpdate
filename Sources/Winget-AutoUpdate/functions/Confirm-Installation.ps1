@@ -39,7 +39,7 @@ Function Confirm-Installation ($AppName, $AppVer, $src = "winget", $Scope) {
     & $Winget export -s $src -o $JsonFile --include-versions | Out-Null
 
     $Packages = (Get-Content $JsonFile -Raw | ConvertFrom-Json).Sources.Packages
-    $match = $Packages | Where-Object { $_.PackageIdentifier -eq $AppName -and $_.Version -like "$AppVer*" }
+    $match = $Packages | Where-Object { $_.PackageIdentifier -eq $AppName -and ($_.Version -like "$AppVer*" -or (Test-WauSameVersion $_.Version $AppVer)) }
 
     return [bool]$match
 }

@@ -394,7 +394,7 @@ else {
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     Title="Software Update Required"
-    Width="700"
+    Width="740"
     SizeToContent="Height"
     ResizeMode="NoResize"
     WindowStartupLocation="CenterScreen"
@@ -740,7 +740,7 @@ else {
                 <ListView.View>
                     <GridView>
                         <!-- Checkbox -->
-                        <GridViewColumn Width="38">
+                        <GridViewColumn Width="36">
                             <GridViewColumn.CellTemplate>
                                 <DataTemplate>
                                     <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}">
@@ -754,7 +754,7 @@ else {
                                                         <Setter Property="IsEnabled" Value="False"/>
                                                     </DataTrigger>
                                                 </Style.Triggers>
-                                            </Style>
+                                             </Style>
                                         </CheckBox.Style>
                                     </CheckBox>
                                 </DataTemplate>
@@ -762,7 +762,7 @@ else {
                         </GridViewColumn>
 
                         <!-- Application Name -->
-                        <GridViewColumn Header="Application" Width="200">
+                        <GridViewColumn Header="Application" Width="230">
                             <GridViewColumn.CellTemplate>
                                 <DataTemplate>
                                     <StackPanel>
@@ -781,7 +781,7 @@ else {
                         </GridViewColumn>
 
                         <!-- Available Version -->
-                        <GridViewColumn Header="Available Version" Width="120">
+                        <GridViewColumn Header="Available Version" Width="105">
                             <GridViewColumn.CellTemplate>
                                 <DataTemplate>
                                     <TextBlock Text="{Binding AvailableVersion}"
@@ -793,10 +793,11 @@ else {
                         </GridViewColumn>
 
                         <!-- Required By -->
-                        <GridViewColumn Header="Required By" Width="130">
+                        <GridViewColumn Header="Required By" Width="155">
                             <GridViewColumn.CellTemplate>
                                 <DataTemplate>
                                     <TextBlock Text="{Binding DeadlineDisplay}"
+                                               ToolTip="{Binding DeadlineDisplay}"
                                                FontSize="12"
                                                Foreground="{DynamicResource Brush.TextSecondary}"
                                                VerticalAlignment="Center"/>
@@ -805,7 +806,7 @@ else {
                         </GridViewColumn>
 
                         <!-- Time Remaining Pill Badge -->
-                        <GridViewColumn Header="Time Remaining" Width="140">
+                        <GridViewColumn Header="Time Remaining" Width="118">
                             <GridViewColumn.CellTemplate>
                                 <DataTemplate>
                                     <Border Background="{Binding BadgeBackground}"
@@ -977,8 +978,6 @@ else {
     if ($listSummaryTxt) { $listSummaryTxt.Text = "$updatableCount update$(if ($updatableCount -ne 1) { 's' }) ready ($blockedCount blocked hidden)" }
     $appListCtrl.ItemsSource = @($sortedRows | Where-Object CanUpdate)
 }
-#endregion WINDOW SETUP
-
 #region INTERACTION LOGIC
 # Tracks the user's chosen action. Defaults to Remind for safety.
 $script:Action     = 'Remind'
@@ -1180,16 +1179,21 @@ if ($script:Action -eq 'UpdateNow') {
         catch {
             # Preserve the installed user scope when the applicability check is
             # inconclusive. Update-App will still require --scope user.
-            [System.Windows.MessageBox]::Show("Die Scope-Pruefung konnte nicht abgeschlossen werden. Benutzer-Updates bleiben im Benutzerkontext.`n`n$($_.Exception.Message)", 'WAU') | Out-Null
+            [System.Windows.MessageBox]::Show("Scope check could not be completed. User updates will remain in user context.`n`n$($_.Exception.Message)", 'WAU') | Out-Null
         }
     }
     $approved = @(Select-WauApprovedUpdates -Apps $chosen -ConfirmMigration {
         param($app)
-        $message = "$($app.Name) $($app.AvailableVersion) bietet laut WinGet keinen passenden Benutzer-Installer mehr, aber einen Machine-Installer.`n`nSoll die neue Version mit SYSTEM-Rechten fuer alle Benutzer installiert werden?`n`nDie bestehende Benutzerinstallation und deren Daten werden nicht automatisch entfernt. Je nach Hersteller koennen beide Installationen bestehen bleiben.`n`nJa: Machine-Installation freigeben.`nNein: Dieses Update ueberspringen; Benutzerinstallation beibehalten."
-        $answer = [System.Windows.MessageBox]::Show($message, 'Wechsel von User zu Machine bestaetigen',
+        $cleanAppName = Get-WauCleanAppName $app.Name $app.Version
+        $message = "$cleanAppName $($app.AvailableVersion) no longer provides a user-scoped installer in WinGet, but includes a machine-scoped installer.`n`nWould you like to install the new version with SYSTEM privileges for all users?`n`nThe existing user installation and its user data will not be automatically removed. Depending on the software, both installations may coexist.`n`nYes: Allow machine installation.`nNo: Skip this update and keep current user installation."
+        $answer = [System.Windows.MessageBox]::Show($message, 'Confirm User to Machine Scope Migration',
             [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question,
             [System.Windows.MessageBoxResult]::No)
-        return $answer -eq [System.Windows.MessageBoxResult]::Yes
+        if ($answer -eq [System.Windows.MessageBoxResult]::Yes) {
+            $app.Name = $cleanAppName
+            return $true
+        }
+        return $false
     })
     if ($approved.Count -gt 0) {
         # Keep selection separate from inventory: a subsequent scan cannot replace
@@ -1197,7 +1201,7 @@ if ($script:Action -eq 'UpdateNow') {
         $requestPath = Join-Path $PSScriptRoot 'config\update-request.json'
         $runningTask = Get-ScheduledTask -TaskName 'Winget-AutoUpdate-UpdateNow' -TaskPath '\WAU\' -ErrorAction SilentlyContinue
         if ((Test-Path $requestPath) -or ($runningTask -and $runningTask.State -eq 'Running')) {
-            [System.Windows.MessageBox]::Show('Ein Updateauftrag wartet bereits auf die Verarbeitung. Bitte spaeter erneut versuchen.', 'WAU') | Out-Null
+            [System.Windows.MessageBox]::Show('An update request is already pending processing. Please try again later.', 'WAU') | Out-Null
         }
         else {
             Write-WauAtomicJson $requestPath ([pscustomobject]@{
@@ -1209,7 +1213,7 @@ if ($script:Action -eq 'UpdateNow') {
                 try { $updateTask | Start-ScheduledTask -ErrorAction Stop }
                 catch {
                     Remove-Item -LiteralPath $requestPath -ErrorAction SilentlyContinue
-                    [System.Windows.MessageBox]::Show("Updateauftrag konnte nicht gestartet werden: $_", 'WAU') | Out-Null
+                    [System.Windows.MessageBox]::Show("Update request could not be started: $_", 'WAU') | Out-Null
                 }
             }
             else {

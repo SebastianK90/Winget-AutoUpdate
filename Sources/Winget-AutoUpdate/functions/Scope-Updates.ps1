@@ -12,12 +12,8 @@ function Get-WauDeadlineRegistryPath {
     if (-not $packageId -or $packageId -notmatch '^[A-Za-z0-9][A-Za-z0-9._+\-]{0,255}$') {
         throw 'Invalid WinGet package ID for deadline registry path.'
     }
-    $source = if ($App.Source) { [string]$App.Source } else { 'winget' }
-    if ($source -notmatch '^[A-Za-z0-9][A-Za-z0-9._+\-]{0,127}$') {
-        throw 'Invalid WinGet source for deadline registry path.'
-    }
     if ($App.Scope -notin @('user','machine')) { throw 'Invalid deadline scope.' }
-    $path = Join-Path (Join-Path $DeadlineRegPath $packageId) $source
+    $path = Join-Path $DeadlineRegPath $packageId
     if ($App.Scope -eq 'machine') { return Join-Path $path 'machine' }
     $sid = [string]$App.UserSid
     if ($sid -notmatch '^S-1-(?:5-21|12-1)-\d+-\d+-\d+-\d+$') { throw 'Invalid deadline user SID.' }
@@ -40,16 +36,6 @@ function Remove-WauUpdateDeadline {
     }
 }
 
-function Remove-WauLegacyDeadlineEntry {
-    param($Entry)
-    if (@(Get-ChildItem -LiteralPath $Entry.PSPath -ErrorAction SilentlyContinue).Count) {
-        $properties = Get-ItemProperty -LiteralPath $Entry.PSPath -ErrorAction SilentlyContinue
-        foreach ($property in @($properties.PSObject.Properties | Where-Object { $_.Name -notmatch '^PS(Path|ParentPath|ChildName|Drive|Provider)$' })) {
-            Remove-ItemProperty -LiteralPath $Entry.PSPath -Name $property.Name -ErrorAction SilentlyContinue
-        }
-    }
-    else { Remove-Item -LiteralPath $Entry.PSPath -Recurse -Force -ErrorAction SilentlyContinue }
-}
 
 function Set-WauDeadlineLeafValues {
     param([string]$Path, $App, [datetime]$FirstDetected, [datetime]$Deadline, [string]$AvailableVersion)
@@ -64,60 +50,53 @@ function Set-WauDeadlineLeafValues {
     Set-ItemProperty -LiteralPath $Path -Name IdentityKey -Value (Get-WauAppKey $App)
 }
 
-function Convert-WauDeadlineRegistryLayout {
-    param([array]$Apps, [string]$DeadlineRegPath = 'HKLM:\SOFTWARE\Romanitho\Winget-AutoUpdate\UpdateDeadlines')
-    if (-not (Test-Path -LiteralPath $DeadlineRegPath)) { return }
-    foreach ($entry in @(Get-ChildItem -LiteralPath $DeadlineRegPath -ErrorAction SilentlyContinue)) {
-        $props = Get-ItemProperty -LiteralPath $entry.PSPath -ErrorAction SilentlyContinue
-        if (-not $props.FirstDetected -or -not $props.Deadline) { continue }
-        $packageId = if ($props.PackageId) { [string]$props.PackageId } else { [string]$entry.PSChildName }
-        $matches = @($Apps | Where-Object {
-            $_.Id -eq $packageId -and
-            (-not $props.Scope -or $_.Scope -eq $props.Scope) -and
-            (-not $props.UserSid -or $_.UserSid -eq $props.UserSid) -and
-            (-not $props.Source -or $_.Source -eq $props.Source)
-        })
-        if (-not $matches.Count) {
-            Remove-WauLegacyDeadlineEntry -Entry $entry
-            Write-ToLog "Deadline purged during registry migration (app no longer outdated): $packageId"
-            continue
+function Get-WauCleanAppName ($Name, $Version) {
+    $clean = [string]$Name
+    if ($Version) {
+        $escapedVer = [regex]::Escape($Version)
+        $clean = $clean -replace "(?i)\s*(version\s*|v\.?\s*)?$escapedVer\b", ""
+        $verParts = $Version.Split('.')
+        if ($verParts.Count -ge 3) {
+            $threePart = [regex]::Escape("$($verParts[0]).$($verParts[1]).$($verParts[2])")
+            $clean = $clean -replace "(?i)\s*(version\s*|v\.?\s*)?$threePart\b", ""
         }
-        $first = [datetime]::MinValue; $due = [datetime]::MinValue
-        if (-not [datetime]::TryParse([string]$props.FirstDetected, [ref]$first) -or
-            -not [datetime]::TryParse([string]$props.Deadline, [ref]$due)) {
-            Remove-WauLegacyDeadlineEntry -Entry $entry
-            Write-ToLog "Deadline purged during registry migration (invalid dates): $packageId" 'Yellow'
-            continue
+        if ($verParts.Count -ge 2) {
+            $twoPart = [regex]::Escape("$($verParts[0]).$($verParts[1])")
+            $clean = $clean -replace "(?i)\s*(version\s*|v\.?\s*)?$twoPart\b", ""
         }
-        $migrated = $true
-        foreach ($app in $matches) {
-            try {
-                $destination = Get-WauDeadlineRegistryPath -App $app -DeadlineRegPath $DeadlineRegPath
-                $existing = Get-ItemProperty -LiteralPath $destination -ErrorAction SilentlyContinue
-                $mergedFirst = $first; $mergedDue = $due
-                if ($existing) {
-                    $existingFirst = [datetime]::MaxValue; $existingDue = [datetime]::MaxValue
-                    if ([datetime]::TryParse([string]$existing.FirstDetected, [ref]$existingFirst) -and $existingFirst -lt $mergedFirst) { $mergedFirst = $existingFirst }
-                    if ([datetime]::TryParse([string]$existing.Deadline, [ref]$existingDue) -and $existingDue -lt $mergedDue) { $mergedDue = $existingDue }
-                }
-                $version = if ($props.AvailableVersion) { [string]$props.AvailableVersion } else { [string]$app.AvailableVersion }
-                Set-WauDeadlineLeafValues -Path $destination -App $app -FirstDetected $mergedFirst -Deadline $mergedDue -AvailableVersion $version
-                $check = Get-ItemProperty -LiteralPath $destination -ErrorAction Stop
-                if ($check.IdentityKey -ne (Get-WauAppKey $app)) { throw 'Migrated deadline verification failed.' }
-            }
-            catch { $migrated = $false; Write-ToLog "Deadline migration failed for $packageId`: $_" 'Yellow'; break }
-        }
-        if (-not $migrated) { continue }
-        Remove-WauLegacyDeadlineEntry -Entry $entry
-        Write-ToLog "Deadline registry entry migrated: $packageId"
     }
+    return $clean.Trim()
 }
 
 function Test-WauSameVersion ([string]$Installed, [string]$Expected) {
-    if ($Installed -eq $Expected) { return $true }
-    if ($Installed -notmatch '^\d+(\.\d+){1,3}$' -or $Expected -notmatch '^\d+(\.\d+){1,3}$') { return $false }
-    # WinGet manifests and ARP often differ only by trailing zero components.
-    return ($Installed -replace '(\.0)+$', '') -eq ($Expected -replace '(\.0)+$', '')
+    if ([string]::IsNullOrWhiteSpace($Installed) -or [string]::IsNullOrWhiteSpace($Expected)) { return $false }
+    $inst = $Installed.Trim().TrimStart('v', 'V')
+    $exp  = $Expected.Trim().TrimStart('v', 'V')
+    if ($inst -eq $exp) { return $true }
+
+    # Normalize dot-separated numeric versions: strip trailing zero segments and compare integer parts
+    if ($inst -match '^\d+(\.\d+)+$' -and $exp -match '^\d+(\.\d+)+$') {
+        try {
+            $instParts = [System.Collections.Generic.List[long]]::new([long[]]($inst.Split('.') | ForEach-Object { [long]$_ }))
+            $expParts  = [System.Collections.Generic.List[long]]::new([long[]]($exp.Split('.') | ForEach-Object { [long]$_ }))
+            while ($instParts.Count -gt 0 -and $instParts[$instParts.Count - 1] -eq 0) {
+                $instParts.RemoveAt($instParts.Count - 1)
+            }
+            while ($expParts.Count -gt 0 -and $expParts[$expParts.Count - 1] -eq 0) {
+                $expParts.RemoveAt($expParts.Count - 1)
+            }
+            if ($instParts.Count -ne $expParts.Count) { return $false }
+            for ($i = 0; $i -lt $instParts.Count; $i++) {
+                if ($instParts[$i] -ne $expParts[$i]) { return $false }
+            }
+            return $true
+        } catch {}
+    }
+
+    # WinGet manifests and ARP often differ only by trailing zero components (e.g. 26.03.00.0 vs 26.03).
+    $instClean = $inst -replace '(\.0+)+$', ''
+    $expClean  = $exp -replace '(\.0+)+$', ''
+    return ($instClean -eq $expClean)
 }
 
 function Invoke-WauWinget {
@@ -274,8 +253,13 @@ function Select-WauApprovedUpdates {
 
 function Get-WauInteractiveUser {
     $session = [Diagnostics.Process]::GetCurrentProcess().SessionId
-    $explorers = @(Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" | Where-Object { $_.SessionId -eq $session })
-    if ($session -eq 0 -or -not $explorers) { return $null }
+    if ($session -eq 0) {
+        $explorers = @(Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" | Where-Object { $_.SessionId -gt 0 })
+    }
+    else {
+        $explorers = @(Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" | Where-Object { $_.SessionId -eq $session })
+    }
+    if (-not $explorers) { return $null }
     $owner = Invoke-CimMethod -InputObject $explorers[0] -MethodName GetOwnerSid
     if ($owner.ReturnValue -eq 0) { return $owner.Sid }
     return $null

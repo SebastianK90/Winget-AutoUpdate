@@ -132,7 +132,7 @@
             <RegistrySearch Id="SearchUpdateDeadlineDays" Type="raw" Root="HKLM" Key="SOFTWARE\[Manufacturer]\[ProductName]" Name="WAU_UpdateDeadlineDays" />
         </Property>
         <Property Id="UPDATEDEADLINEHOURS" Secure="yes" />
-        <Property Id="UPDATEDEADLINEHOURS_VALUE" Value="#8">
+        <Property Id="UPDATEDEADLINEHOURS_VALUE" Value="#0">
             <RegistrySearch Id="SearchUpdateDeadlineHours" Type="raw" Root="HKLM" Key="SOFTWARE\[Manufacturer]\[ProductName]" Name="WAU_UpdateDeadlineHours" />
         </Property>
         <Property Id="COMPANYNAME" Secure="yes" />

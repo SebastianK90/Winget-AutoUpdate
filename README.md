@@ -217,7 +217,7 @@ Optional GitHub Personal Access Token to raise the API rate limit from 60 to 5,0
 Specify a central network share folder (e.g. `\\server\share\wau\cache`) to enable decentralized peer-to-peer caching for package deferrals across corporate networks. The first client resolving an update release date saves it to the share; all other clients read from the share without querying GitHub, preventing API rate limit issues. If unreachable (e.g. laptop off VPN), clients automatically fall back to their local cache.
 
 ### UPDATEDEADLINEHOURS
-Default value 8 (hours, representing a standard workday). Specify the number of hours from first detection until pending updates are forced silently in the background.<br>
+Default value 0 (disabled). Specify the number of hours from first detection until pending updates are forced silently in the background.<br>
 When set to a value greater than 0, WAU will display an update prompt dialog to logged-in users instead of immediately and silently updating apps. The user can choose "Update Now" or "Remind Me in X hours". Once the deadline is reached, updates are forced automatically.
 
 ### UPDATEDEADLINEDAYS (Legacy)

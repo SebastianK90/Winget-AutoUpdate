@@ -327,14 +327,137 @@ if (Test-Network) {
             exit 0
         }
         $userContextTriggered = $false
-        $outdated = @(Get-WingetOutdatedApps -src $Script:WingetSourceCustom)
+        $migrationTriggeredOnly = $false
+
+        # If running as SYSTEM, process any pending scope migrations approved by users
+        if ($Script:IsSystem) {
+            $userSubkeys = @([Microsoft.Win32.Registry]::Users.GetSubKeyNames() | Where-Object {
+                $_ -match '^S-1-5-21-\d+-\d+-\d+-\d+$' -or $_ -match '^S-1-12-1-\d+-\d+-\d+-\d+$'
+            })
+            foreach ($sid in $userSubkeys) {
+                $userWauPath = "Registry::HKEY_USERS\$sid\SOFTWARE\Romanitho\Winget-AutoUpdate"
+                $trig = (Get-ItemProperty -LiteralPath $userWauPath -Name "ScopeMigrationTriggered" -ErrorAction SilentlyContinue).ScopeMigrationTriggered
+                if ($trig -eq 1) {
+                    $migrationTriggeredOnly = $true
+                    Remove-ItemProperty -LiteralPath $userWauPath -Name "ScopeMigrationTriggered" -Force -ErrorAction SilentlyContinue
+                }
+
+                $approvedPath = "$userWauPath\ApprovedScopeMigrations"
+                if (Test-Path -LiteralPath $approvedPath) {
+                    $pendingApps = @(Get-ChildItem -LiteralPath $approvedPath -ErrorAction SilentlyContinue)
+                    foreach ($regItem in $pendingApps) {
+                        $props = Get-ItemProperty -LiteralPath $regItem.PSPath -ErrorAction SilentlyContinue
+                        if ($props -and $props.PackageId) {
+                            $pkgId = $props.PackageId
+                            $pkgName = if ($props.Name) { $props.Name } else { $pkgId }
+                            $pkgVer = $props.ApprovedVersion
+                            $pkgCurVer = if ($props.CurrentVersion) { [string]$props.CurrentVersion } else { 'Unknown' }
+                            $pkgSrc = if ($props.Source) { $props.Source } else { $Script:WingetSourceCustom }
+
+                            Write-ToLog "Processing approved scope migration for $pkgName ($pkgId) to machine scope..." "Cyan"
+
+                            $migApp = [pscustomobject]@{
+                                Id = $pkgId
+                                Name = $pkgName
+                                Version = $pkgCurVer
+                                AvailableVersion = $pkgVer
+                                Scope = 'user'
+                                TargetScope = 'machine'
+                                ScopeMigrationApproved = $true
+                                UserSid = $sid
+                            }
+                            $machineSupport = Get-WauInstallerSupport -App $migApp -Scope machine -Source $pkgSrc
+                            if ($machineSupport -eq 'Supported') {
+                                Update-App $migApp -src $pkgSrc
+                                if (Confirm-Installation $pkgId $pkgVer $pkgSrc -Scope 'machine') {
+                                    Write-ToLog "Scope migration to machine scope successful for $pkgName ($pkgId)." "Green"
+                                }
+                                else {
+                                    Write-ToLog "Scope migration install did not result in confirmed machine installation for $pkgName ($pkgId)." "Yellow"
+                                }
+                            }
+                            else {
+                                Write-ToLog "Machine installer support no longer valid for $pkgName ($pkgId)." "Yellow"
+                            }
+                            Remove-Item -LiteralPath $regItem.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+                        }
+                    }
+                }
+            }
+        }
+
+        if ($migrationTriggeredOnly) {
+            $outdated = @()
+        }
+        else {
+            $outdated = @(Get-WingetOutdatedApps -src $Script:WingetSourceCustom)
+        }
         foreach ($app in $outdated) {
             $reason = Get-WauBlockReason $app
             if ($reason) { Write-ToLog "$($app.Name): $reason" 'Gray'; continue }
             if ($app.Version -eq 'Unknown') { Write-ToLog "$($app.Name): unknown version requires interactive review" 'Yellow'; continue }
-            # No scope-changing install fallback in unattended runs.
+
+            # Check for User -> Machine scope migration
+            if ($app.Scope -eq 'user') {
+                $userSupport = Get-WauInstallerSupport -App $app -Scope user -Source $Script:WingetSourceCustom
+                if ($userSupport -eq 'Unavailable') {
+                    $machineSupport = Get-WauInstallerSupport -App $app -Scope machine -Source $Script:WingetSourceCustom
+                    if ($machineSupport -eq 'Supported') {
+                        # If already installed in machine scope at available version, skip prompting
+                        if (Confirm-Installation $app.Id $app.AvailableVersion $Script:WingetSourceCustom -Scope 'machine') {
+                            Write-ToLog "$($app.Name): Machine-scoped installation already present at version $($app.AvailableVersion)." "Yellow"
+                            continue
+                        }
+
+                        Add-Type -AssemblyName PresentationFramework -ErrorAction SilentlyContinue
+                        $cleanAppName = Get-WauCleanAppName $app.Name $app.Version
+                        $message = "$cleanAppName $($app.AvailableVersion) no longer provides a user-scoped installer in WinGet, but includes a machine-scoped installer.`n`nWould you like to install the new version with administrator privileges for all users?`n`nThe existing user installation and its user data will not be automatically removed. Depending on the software, both installations may coexist.`n`nYes: Allow machine installation.`nNo: Skip this update and keep current user installation."
+                        $answer = [System.Windows.MessageBox]::Show($message, 'Confirm User to Machine Scope Migration',
+                            [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question,
+                            [System.Windows.MessageBoxResult]::No)
+                        if ($answer -eq [System.Windows.MessageBoxResult]::Yes) {
+                            Write-ToLog "$($app.Name): User approved migration to machine scope. Queuing for SYSTEM execution." "Cyan"
+                            $regPath = "HKCU:\SOFTWARE\Romanitho\Winget-AutoUpdate\ApprovedScopeMigrations\$($app.Id)"
+                            if (-not (Test-Path -LiteralPath $regPath)) {
+                                New-Item -Path $regPath -Force | Out-Null
+                            }
+                            Set-ItemProperty -LiteralPath $regPath -Name "PackageId" -Value $app.Id -Force
+                            Set-ItemProperty -LiteralPath $regPath -Name "Name" -Value $cleanAppName -Force
+                            Set-ItemProperty -LiteralPath $regPath -Name "CurrentVersion" -Value $app.Version -Force
+                            Set-ItemProperty -LiteralPath $regPath -Name "ApprovedVersion" -Value $app.AvailableVersion -Force
+                            Set-ItemProperty -LiteralPath $regPath -Name "Source" -Value $Script:WingetSourceCustom -Force
+                            Set-ItemProperty -LiteralPath $regPath -Name "Timestamp" -Value (Get-Date -Format "o") -Force
+                            $script:HasPendingScopeMigration = $true
+                            continue
+                        }
+                        else {
+                            Write-ToLog "$($app.Name): Migration to machine scope declined by user." "Yellow"
+                            continue
+                        }
+                    }
+                    else {
+                        Write-ToLog "$($app.Name): No applicable installer found in user or machine scope." "Yellow"
+                        continue
+                    }
+                }
+            }
+
             Update-App $app -src $Script:WingetSourceCustom
         }
+
+        if ($script:HasPendingScopeMigration -and -not $Script:IsSystem) {
+            Write-ToLog "Triggering SYSTEM task to execute approved scope migrations..." "Cyan"
+            $regWAU = "HKCU:\SOFTWARE\Romanitho\Winget-AutoUpdate"
+            Set-ItemProperty -LiteralPath $regWAU -Name "ScopeMigrationTriggered" -Value 1 -Force
+            $systemTask = Get-ScheduledTask -TaskName 'Winget-AutoUpdate' -TaskPath '\WAU\' -ErrorAction SilentlyContinue
+            if (-not $systemTask) {
+                $systemTask = Get-ScheduledTask -TaskName 'Winget-AutoUpdate' -ErrorAction SilentlyContinue
+            }
+            if ($systemTask) {
+                $systemTask | Start-ScheduledTask -ErrorAction SilentlyContinue
+            }
+        }
+
         if ($InstallOK -eq 0 -or !$InstallOK) {
             Write-ToLog "No new update." "Green"
         }
@@ -348,7 +471,7 @@ if (Test-Network) {
         }
 
         #Check if user context is activated during system run
-        if ($IsSystem -and ($WAUConfig.WAU_UserContext -eq 1) -and -not $userContextTriggered) {
+        if ($IsSystem -and ($WAUConfig.WAU_UserContext -eq 1) -and -not $userContextTriggered -and -not $migrationTriggeredOnly) {
 
             $UserContextTask = Get-ScheduledTask -TaskName 'Winget-AutoUpdate-UserContext' -ErrorAction SilentlyContinue
 
