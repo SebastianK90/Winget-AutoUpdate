@@ -44,6 +44,7 @@ function Invoke-WauDeadlineCycle {
     }
     # Retain scope/SID identity even when a package exists twice.
     $apps = @($apps | Sort-Object Key -Unique)
+    Convert-WauDeadlineRegistryLayout -Apps $apps
     foreach ($app in $apps) {
         $app | Add-Member NoteProperty BlockReason (Get-WauBlockReason $app) -Force
         $app | Add-Member NoteProperty CanUpdate ([string]::IsNullOrEmpty($app.BlockReason)) -Force

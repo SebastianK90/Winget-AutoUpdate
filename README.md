@@ -67,7 +67,7 @@ You can easily translate toast notifications by creating your locale xml config 
 WAU runs by default, at logon. You can configure the frequency with options (Daily, BiDaily, Weekly, BiWeekly, Monthly or Never).
 
 ### Log location
-You can find logs in install location, in logs folder for privileged executions. For user runs (Winget-Install.ps1) a log file will be created at %AppData%\Winget-AutoUpdate\Logs .<br>
+SYSTEM update logs are written to `C:\Program Files\Winget-AutoUpdate\logs\updates.log`; user-scope update logs are written to `%LOCALAPPDATA%\Winget-AutoUpdate\Logs\updates.log`. The SYSTEM log does not grant Authenticated Users write access; existing explicit grants are removed on the next SYSTEM write.<br>
 If **Intune Management Extension** is installed, a **SymLink** (WAU-updates.log) is created under **C:\ProgramData\Microsoft\IntuneManagementExtension\Logs**<br>
 If you are deploying winget Apps with [Winget-Install](https://github.com/Romanitho/Winget-AutoUpdate/blob/main/Sources/Winget-AutoUpdate/Winget-Install.ps1) a **SymLink** (WAU-install.log & WAU-user_%username%.log) is also created under **C:\ProgramData\Microsoft\IntuneManagementExtension\Logs**
 
@@ -92,6 +92,12 @@ To force WAU to run on metered connections anyway, run new installation with `-R
 
 ### System & user context
 WAU runs with system and user contexts. This way, even apps installed on User's scope are updated. Shorcuts for manually run can also be installed.
+
+### Security hardening
+
+- The update GUI is launched into the Windows session associated with the scanned user. ServiceUI uses that session ID rather than selecting an arbitrary `explorer.exe` process. If the session cannot be determined unambiguously, WAU skips the prompt and records the reason in the log. This also applies to installations without the helper prompt task.
+- Remote Mods, app lists and Azure Blob Mod URLs must use HTTPS. AzCopy and downloaded Mod/list files follow only HTTPS redirects and require TLS 1.2. Downloads replace existing files only after a complete, successful transfer; remote Mod filenames are validated.
+- SYSTEM and user update logs are stored separately. The central SYSTEM log removes explicit write permissions previously granted to Authenticated Users.
 
 ### Default install location
 By default, scripts and components will be placed in "Program Files" location (inside a Winget-AutoUpdate folder).
@@ -120,9 +126,9 @@ Default value 0. Set `DISABLEWAUAUTOUPDATE=1` to disable Winget-AutoUpdate self 
 Set `USEWHITELIST=1` to force WAU to use WhiteList. During installation, if a whitelist is provided, this setting is automatically set to 1.
 
 ### LISTPATH
-Get Black/White List from external Path (**URL/UNC/Local/GPO**) - download/copy to Winget-AutoUpdate installation location if external list is newer.<br>
+Get Black/White List from external Path (**HTTPS URL/UNC/Local/GPO**) - download/copy to Winget-AutoUpdate installation location if external list is newer.<br>
 **PATH** must end with a Directory, not a File...<br>
-...if the external Path is an **URL** and the web host doesn't respond with a date/time header for the file (i.e **GitHub**) then the file is always downloaded!<br>
+...if the external Path is an **HTTPS URL** and the web host doesn't respond with a date/time header for the file (i.e **GitHub**) then the file is always downloaded!<br>
 
 If the external Path is a Private Azure Container protected by a SAS token (**resourceURI?sasToken**), every special character should be escaped at installation time.<br>
 It doesn't work to call Powershell in **CMD** to install **WAU** with the parameter:<br>
@@ -135,7 +141,7 @@ If a blacklist or whitelist is configured via Group Policy (GPO), WAU will autom
 
 
 ### MODSPATH
-Get Mods from external Path (**URL/UNC/Local/AzureBlob**) - download/copy to `mods` in Winget-AutoUpdate installation location if external mods are newer.<br>
+Get Mods from external Path (**HTTPS URL/UNC/Local/AzureBlob**) - download/copy to `mods` in Winget-AutoUpdate installation location if external mods are newer.<br>
 For **URL**: This requires a site directory with **Directory Listing Enabled** and no index page overriding the listing of files (or an index page with href listing of all the **Mods** to be downloaded):
 ```html
 <ul>
@@ -158,10 +164,12 @@ Used in conjunction with the **-ModsPath** parameter to provide the Azure Storag
 
 ### USERCONTEXT
 
-Local scoped-update build: the deadline GUI always scans both the machine and
-the user of its desktop session. `USERCONTEXT` continues to control the classic
-silent user task when deadline mode is disabled. See [SCOPED-UPDATES.md](SCOPED-UPDATES.md)
-for scope preservation, explicit user-to-machine consent, installation and tests.
+The deadline GUI scans both machine updates and updates for the user of its desktop
+session. `USERCONTEXT` controls the classic silent user task when deadline mode is
+disabled. A user-to-machine migration requires explicit consent. Deadline entries
+are stored under `UpdateDeadlines\<WinGet ID>\<Source>\machine` or
+`UpdateDeadlines\<WinGet ID>\<Source>\user\<SID>`; existing source-less entries are
+migrated without resetting their dates.
 
 Default value 0. Set `USERCONTEXT=1` to install WAU with system and **user** context executions.<br>
 Applications installed in system context will be ignored under user context.

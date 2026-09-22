@@ -30,7 +30,9 @@ Function Update-App ($app, $src = "winget") {
         }
         $targetScope = 'machine'
     }
-    if (($targetScope -eq 'machine') -ne $Script:IsSystem) {
+    # An explicitly approved user-to-machine migration starts in the interactive
+    # user session so Windows can display the installer's UAC consent dialog.
+    if (($targetScope -eq 'machine') -ne $Script:IsSystem -and -not ($migration -and $app.ScopeMigrationApproved)) {
         Write-ToLog "Wrong execution context for $($app.Id) ($targetScope)" 'Red'; return
     }
     if ($targetScope -eq 'user' -and $app.UserSid -ne [Security.Principal.WindowsIdentity]::GetCurrent().User.Value) {

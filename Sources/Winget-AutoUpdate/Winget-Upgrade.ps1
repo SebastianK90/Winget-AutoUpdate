@@ -1,4 +1,4 @@
-#region LOAD FUNCTIONS
+﻿#region LOAD FUNCTIONS
 # Get the Working Dir
 [string]$Script:WorkingDir = $PSScriptRoot
 
@@ -15,13 +15,19 @@ $Script:ProgressPreference = [System.Management.Automation.ActionPreference]::Si
 # Set GitHub Repo
 [string]$Script:GitHub_Repo = "Winget-AutoUpdate"
 
-# Log initialization
-[string]$LogFile = [System.IO.Path]::Combine($Script:WorkingDir, 'logs', 'updates.log')
+# Log initialization. Keep the protected SYSTEM audit separate from logs written
+# by an interactive user process.
+[bool]$Script:IsSystem = [System.Security.Principal.WindowsIdentity]::GetCurrent().IsSystem
+if ($Script:IsSystem) {
+    [string]$LogFile = [System.IO.Path]::Combine($Script:WorkingDir, 'logs', 'updates.log')
+}
+else {
+    [string]$LogFile = [System.IO.Path]::Combine($env:LOCALAPPDATA, 'Winget-AutoUpdate', 'Logs', 'updates.log')
+}
 #endregion INITIALIZATION
 
 #region CONTEXT
 # Check if running account is system or interactive logon System(default) otherwise User
-[bool]$Script:IsSystem = [System.Security.Principal.WindowsIdentity]::GetCurrent().IsSystem
 
 # Check for current session ID (O = system without ServiceUI)
 [Int32]$Script:SessionID = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
@@ -42,19 +48,21 @@ if ($true -eq $IsSystem) {
         [string]$ServiceUIexe = [System.IO.Path]::Combine($Script:WorkingDir, 'ServiceUI.exe')
         [bool]$IsServiceUI = Test-Path $ServiceUIexe -PathType Leaf
         if ($true -eq $IsServiceUI) {
-            #Check if any connected user
-            $explorerprocesses = @(Get-CimInstance -Query "SELECT * FROM Win32_Process WHERE Name='explorer.exe'" -ErrorAction SilentlyContinue)
-            if ($explorerprocesses.Count -gt 0) {
-                Write-ToLog "Rerun WAU in system context with ServiceUI"
+            # Resolve one active user and launch into that exact session. Matching
+            # only explorer.exe is ambiguous with RDP or Fast User Switching.
+            $interactiveSid = Get-WauInteractiveUser
+            $interactiveSession = if ($interactiveSid) { Get-WauInteractiveSessionId -UserSid $interactiveSid } else { $null }
+            if ($interactiveSession) {
+                Write-ToLog "Rerun WAU in system context in session $interactiveSession"
                 Start-Process `
                     -FilePath $ServiceUIexe `
-                    -ArgumentList "-process:explorer.exe $env:windir\System32\conhost.exe --headless powershell.exe -NoProfile -ExecutionPolicy Bypass -File winget-upgrade.ps1" `
+                    -ArgumentList "-session:$interactiveSession $env:windir\System32\conhost.exe --headless powershell.exe -NoProfile -ExecutionPolicy Bypass -File winget-upgrade.ps1" `
                     -WorkingDirectory $WorkingDir
                 Wait-Process "ServiceUI" -ErrorAction SilentlyContinue
                 Exit 0
             }
             else {
-                Write-ToLog -LogMsg "CHECK FOR APP UPDATES (System context)" -IsHeader
+                Write-ToLog -LogMsg "CHECK FOR APP UPDATES (System context - no unambiguous interactive session)" -IsHeader
             }
         }
         else {
@@ -164,10 +172,10 @@ if (Test-Network) {
             $WAUCurrentVersion = $WAUConfig.ProductVersion
             Write-ToLog "WAU current version: $WAUCurrentVersion"
 
-            #Check if WAU update feature is enabled or not if run as System
+            #Check if WAU update feature is enabled or not if run as System (disabled by default)
             $WAUDisableAutoUpdate = $WAUConfig.WAU_DisableAutoUpdate
-            #If yes then check WAU update if run as System
-            if ($WAUDisableAutoUpdate -eq 1) {
+            #If disabled (default) or not set, skip WAU self-update
+            if ($null -eq $WAUDisableAutoUpdate -or $WAUDisableAutoUpdate -ne 0) {
                 Write-ToLog "WAU AutoUpdate is Disabled." "Gray"
             }
             else {
@@ -327,71 +335,8 @@ if (Test-Network) {
             exit 0
         }
         $userContextTriggered = $false
-        $migrationTriggeredOnly = $false
 
-        # If running as SYSTEM, process any pending scope migrations approved by users
-        if ($Script:IsSystem) {
-            $userSubkeys = @([Microsoft.Win32.Registry]::Users.GetSubKeyNames() | Where-Object {
-                $_ -match '^S-1-5-21-\d+-\d+-\d+-\d+$' -or $_ -match '^S-1-12-1-\d+-\d+-\d+-\d+$'
-            })
-            foreach ($sid in $userSubkeys) {
-                $userWauPath = "Registry::HKEY_USERS\$sid\SOFTWARE\Romanitho\Winget-AutoUpdate"
-                $trig = (Get-ItemProperty -LiteralPath $userWauPath -Name "ScopeMigrationTriggered" -ErrorAction SilentlyContinue).ScopeMigrationTriggered
-                if ($trig -eq 1) {
-                    $migrationTriggeredOnly = $true
-                    Remove-ItemProperty -LiteralPath $userWauPath -Name "ScopeMigrationTriggered" -Force -ErrorAction SilentlyContinue
-                }
-
-                $approvedPath = "$userWauPath\ApprovedScopeMigrations"
-                if (Test-Path -LiteralPath $approvedPath) {
-                    $pendingApps = @(Get-ChildItem -LiteralPath $approvedPath -ErrorAction SilentlyContinue)
-                    foreach ($regItem in $pendingApps) {
-                        $props = Get-ItemProperty -LiteralPath $regItem.PSPath -ErrorAction SilentlyContinue
-                        if ($props -and $props.PackageId) {
-                            $pkgId = $props.PackageId
-                            $pkgName = if ($props.Name) { $props.Name } else { $pkgId }
-                            $pkgVer = $props.ApprovedVersion
-                            $pkgCurVer = if ($props.CurrentVersion) { [string]$props.CurrentVersion } else { 'Unknown' }
-                            $pkgSrc = if ($props.Source) { $props.Source } else { $Script:WingetSourceCustom }
-
-                            Write-ToLog "Processing approved scope migration for $pkgName ($pkgId) to machine scope..." "Cyan"
-
-                            $migApp = [pscustomobject]@{
-                                Id = $pkgId
-                                Name = $pkgName
-                                Version = $pkgCurVer
-                                AvailableVersion = $pkgVer
-                                Scope = 'user'
-                                TargetScope = 'machine'
-                                ScopeMigrationApproved = $true
-                                UserSid = $sid
-                            }
-                            $machineSupport = Get-WauInstallerSupport -App $migApp -Scope machine -Source $pkgSrc
-                            if ($machineSupport -eq 'Supported') {
-                                Update-App $migApp -src $pkgSrc
-                                if (Confirm-Installation $pkgId $pkgVer $pkgSrc -Scope 'machine') {
-                                    Write-ToLog "Scope migration to machine scope successful for $pkgName ($pkgId)." "Green"
-                                }
-                                else {
-                                    Write-ToLog "Scope migration install did not result in confirmed machine installation for $pkgName ($pkgId)." "Yellow"
-                                }
-                            }
-                            else {
-                                Write-ToLog "Machine installer support no longer valid for $pkgName ($pkgId)." "Yellow"
-                            }
-                            Remove-Item -LiteralPath $regItem.PSPath -Recurse -Force -ErrorAction SilentlyContinue
-                        }
-                    }
-                }
-            }
-        }
-
-        if ($migrationTriggeredOnly) {
-            $outdated = @()
-        }
-        else {
-            $outdated = @(Get-WingetOutdatedApps -src $Script:WingetSourceCustom)
-        }
+        $outdated = @(Get-WingetOutdatedApps -src $Script:WingetSourceCustom)
         foreach ($app in $outdated) {
             $reason = Get-WauBlockReason $app
             if ($reason) { Write-ToLog "$($app.Name): $reason" 'Gray'; continue }
@@ -409,26 +354,13 @@ if (Test-Network) {
                             continue
                         }
 
-                        Add-Type -AssemblyName PresentationFramework -ErrorAction SilentlyContinue
                         $cleanAppName = Get-WauCleanAppName $app.Name $app.Version
-                        $message = "$cleanAppName $($app.AvailableVersion) no longer provides a user-scoped installer in WinGet, but includes a machine-scoped installer.`n`nWould you like to install the new version with administrator privileges for all users?`n`nThe existing user installation and its user data will not be automatically removed. Depending on the software, both installations may coexist.`n`nYes: Allow machine installation.`nNo: Skip this update and keep current user installation."
-                        $answer = [System.Windows.MessageBox]::Show($message, 'Confirm User to Machine Scope Migration',
-                            [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question,
-                            [System.Windows.MessageBoxResult]::No)
-                        if ($answer -eq [System.Windows.MessageBoxResult]::Yes) {
-                            Write-ToLog "$($app.Name): User approved migration to machine scope. Queuing for SYSTEM execution." "Cyan"
-                            $regPath = "HKCU:\SOFTWARE\Romanitho\Winget-AutoUpdate\ApprovedScopeMigrations\$($app.Id)"
-                            if (-not (Test-Path -LiteralPath $regPath)) {
-                                New-Item -Path $regPath -Force | Out-Null
-                            }
-                            Set-ItemProperty -LiteralPath $regPath -Name "PackageId" -Value $app.Id -Force
-                            Set-ItemProperty -LiteralPath $regPath -Name "Name" -Value $cleanAppName -Force
-                            Set-ItemProperty -LiteralPath $regPath -Name "CurrentVersion" -Value $app.Version -Force
-                            Set-ItemProperty -LiteralPath $regPath -Name "ApprovedVersion" -Value $app.AvailableVersion -Force
-                            Set-ItemProperty -LiteralPath $regPath -Name "Source" -Value $Script:WingetSourceCustom -Force
-                            Set-ItemProperty -LiteralPath $regPath -Name "Timestamp" -Value (Get-Date -Format "o") -Force
-                            $script:HasPendingScopeMigration = $true
-                            continue
+                        if (Show-WauScopeMigrationPrompt -App $app -DisplayName $cleanAppName) {
+                            Write-ToLog "$($app.Name): User approved migration to machine scope." "Cyan"
+                            $app.Name = $cleanAppName
+                            $app | Add-Member NoteProperty TargetScope 'machine' -Force
+                            $app | Add-Member NoteProperty RequiresScopeMigration $true -Force
+                            $app | Add-Member NoteProperty ScopeMigrationApproved $true -Force
                         }
                         else {
                             Write-ToLog "$($app.Name): Migration to machine scope declined by user." "Yellow"
@@ -445,25 +377,13 @@ if (Test-Network) {
             Update-App $app -src $Script:WingetSourceCustom
         }
 
-        if ($script:HasPendingScopeMigration -and -not $Script:IsSystem) {
-            Write-ToLog "Triggering SYSTEM task to execute approved scope migrations..." "Cyan"
-            $regWAU = "HKCU:\SOFTWARE\Romanitho\Winget-AutoUpdate"
-            Set-ItemProperty -LiteralPath $regWAU -Name "ScopeMigrationTriggered" -Value 1 -Force
-            $systemTask = Get-ScheduledTask -TaskName 'Winget-AutoUpdate' -TaskPath '\WAU\' -ErrorAction SilentlyContinue
-            if (-not $systemTask) {
-                $systemTask = Get-ScheduledTask -TaskName 'Winget-AutoUpdate' -ErrorAction SilentlyContinue
-            }
-            if ($systemTask) {
-                $systemTask | Start-ScheduledTask -ErrorAction SilentlyContinue
-            }
-        }
-
         if ($InstallOK -eq 0 -or !$InstallOK) {
             Write-ToLog "No new update." "Green"
         }
 
         # Test if _WAU-mods-postsys.ps1 exists: Mods for WAU (postsys) - if Network is active/any Winget is installed/running as SYSTEM _after_ SYSTEM updates
         if ($true -eq $IsSystem) {
+            $Mods = "$WorkingDir\mods"
             if (Test-Path "$Mods\_WAU-mods-postsys.ps1") {
                 Write-ToLog "Running Mods (postsys) for WAU..." "DarkYellow"
                 & "$Mods\_WAU-mods-postsys.ps1"
@@ -471,23 +391,31 @@ if (Test-Network) {
         }
 
         #Check if user context is activated during system run
-        if ($IsSystem -and ($WAUConfig.WAU_UserContext -eq 1) -and -not $userContextTriggered -and -not $migrationTriggeredOnly) {
+        if ($IsSystem -and ($WAUConfig.WAU_UserContext -eq 1) -and -not $userContextTriggered) {
 
             $UserContextTask = Get-ScheduledTask -TaskName 'Winget-AutoUpdate-UserContext' -ErrorAction SilentlyContinue
 
-            $explorerprocesses = @(Get-CimInstance -Query "SELECT * FROM Win32_Process WHERE Name='explorer.exe'" -ErrorAction SilentlyContinue)
-            If ($explorerprocesses.Count -eq 0) {
-                Write-ToLog "No explorer process found / Nobody interactively logged on..."
+            $interactiveSid = Get-WauInteractiveUser
+            $interactiveSession = if ($interactiveSid) { Get-WauInteractiveSessionId -UserSid $interactiveSid } else { $null }
+            if (-not $UserContextTask) {
+                Write-ToLog "User-context task is missing; skipping user-context updates." "Yellow"
             }
-            Else {
+            elseif (-not $interactiveSid -or $null -eq $interactiveSession) {
+                Write-ToLog "No unambiguous interactive user session found; skipping user-context updates." "Yellow"
+            }
+            else {
                 #Get Winget system apps to escape them before running user context
                 Write-ToLog "User logged on, get a list of installed Winget apps in System context..."
                 # Explicit --scope user makes the old machine-ID exclusion file unnecessary.
 
-                #Run user context scheduled task
-                Write-ToLog "Starting WAU in User context..."
-                $null = $UserContextTask | Start-ScheduledTask -ErrorAction SilentlyContinue
-                Exit 0
+                try {
+                    Write-ToLog "Starting WAU in user context (session $interactiveSession)..."
+                    $null = $UserContextTask | Start-ScheduledTask -ErrorAction Stop
+                    Exit 0
+                }
+                catch {
+                    Write-ToLog "Unable to start WAU in the selected user context: $($_.Exception.Message)" "Red"
+                }
             }
         }
     }

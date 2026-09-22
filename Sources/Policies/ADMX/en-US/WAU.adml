@@ -23,11 +23,11 @@ This policy previously controlled whether GPO Management of Winget-AutoUpdate wa
 If this policy is disabled or not configured, the default is No.</string>
       <string id="DisableAutoUpdate_Name">Disable WAU AutoUpdate</string>
       <string id="DisableAutoUpdate_Explain">This policy setting specifies whether to Disable WAU AutoUpdate or not:
-By default, WAU AutoUpdate is enabled.
+By default, WAU AutoUpdate is disabled.
 It will not overwrite the configurations, icons (if personalised),
 excluded_apps list...
 
-If this policy is disabled or not configured, the default is No.</string>
+If this policy is disabled or not configured, the default is Yes (Disabled).</string>
       <string id="DoNotRunOnMetered_Name">Run WAU on metered connection</string>
       <string id="DoNotRunOnMetered_Explain">This policy setting specifies whether to Run WAU on metered connection or not.
 

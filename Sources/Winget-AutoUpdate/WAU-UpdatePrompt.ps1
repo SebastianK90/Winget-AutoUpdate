@@ -30,7 +30,7 @@
 .NOTES
     Scheduled task:  Winget-AutoUpdate-UpdatePrompt
     Run as:          SYSTEM (S-1-5-18), RunLevel Highest
-    Launch command:  ServiceUI.exe -process:explorer.exe
+    Launch command:  WAU-LaunchUpdatePrompt.ps1 -> ServiceUI.exe -session:<id>
                          powershell.exe -NoProfile -ExecutionPolicy Bypass -Sta
                          -WindowStyle Hidden -EncodedCommand <base64>
     Trigger:         On demand (started by Start-UpdatePromptTask.ps1)
@@ -386,7 +386,11 @@ else {
         CheckBoxBorder      = "#9CA3AF"
     }
 }
-#endregion THEME COLOR TOKENS
+$accent = Get-WauAccentPalette -UserSid $pendingData.Config.UserSid
+$t.PrimaryBtnBg = $accent.Base
+$t.PrimaryBtnHover = $accent.Hover
+$t.PrimaryBtnPressed = $accent.Pressed
+$t.PrimaryBtnText = $accent.Text#endregion THEME COLOR TOKENS
 
 #region XAML
 [xml]$xaml = @"
@@ -1185,11 +1189,7 @@ if ($script:Action -eq 'UpdateNow') {
     $approved = @(Select-WauApprovedUpdates -Apps $chosen -ConfirmMigration {
         param($app)
         $cleanAppName = Get-WauCleanAppName $app.Name $app.Version
-        $message = "$cleanAppName $($app.AvailableVersion) no longer provides a user-scoped installer in WinGet, but includes a machine-scoped installer.`n`nWould you like to install the new version with SYSTEM privileges for all users?`n`nThe existing user installation and its user data will not be automatically removed. Depending on the software, both installations may coexist.`n`nYes: Allow machine installation.`nNo: Skip this update and keep current user installation."
-        $answer = [System.Windows.MessageBox]::Show($message, 'Confirm User to Machine Scope Migration',
-            [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question,
-            [System.Windows.MessageBoxResult]::No)
-        if ($answer -eq [System.Windows.MessageBoxResult]::Yes) {
+        if (Show-WauScopeMigrationPrompt -App $app -DisplayName $cleanAppName) {
             $app.Name = $cleanAppName
             return $true
         }

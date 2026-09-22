@@ -12,8 +12,12 @@ function Get-WauDeadlineRegistryPath {
     if (-not $packageId -or $packageId -notmatch '^[A-Za-z0-9][A-Za-z0-9._+\-]{0,255}$') {
         throw 'Invalid WinGet package ID for deadline registry path.'
     }
+    $source = if ($App.Source) { [string]$App.Source } else { 'winget' }
+    if ($source -notmatch '^[A-Za-z0-9][A-Za-z0-9._+ \-]{0,127}$') {
+        throw 'Invalid WinGet source for deadline registry path.'
+    }
     if ($App.Scope -notin @('user','machine')) { throw 'Invalid deadline scope.' }
-    $path = Join-Path $DeadlineRegPath $packageId
+    $path = Join-Path (Join-Path $DeadlineRegPath $packageId) $source
     if ($App.Scope -eq 'machine') { return Join-Path $path 'machine' }
     $sid = [string]$App.UserSid
     if ($sid -notmatch '^S-1-(?:5-21|12-1)-\d+-\d+-\d+-\d+$') { throw 'Invalid deadline user SID.' }
@@ -37,6 +41,20 @@ function Remove-WauUpdateDeadline {
 }
 
 
+function Remove-WauLegacyDeadlineEntry {
+    param($Entry)
+    if (@(Get-ChildItem -LiteralPath $Entry.PSPath -ErrorAction SilentlyContinue).Count) {
+        # A legacy ID key may now contain the new scope children. Keep those and
+        # remove only the obsolete values stored directly on the package key.
+        $properties = Get-ItemProperty -LiteralPath $Entry.PSPath -ErrorAction SilentlyContinue
+        foreach ($property in @($properties.PSObject.Properties | Where-Object { $_.Name -notmatch '^PS(Path|ParentPath|ChildName|Drive|Provider)$' })) {
+            Remove-ItemProperty -LiteralPath $Entry.PSPath -Name $property.Name -ErrorAction SilentlyContinue
+        }
+    }
+    else {
+        Remove-Item -LiteralPath $Entry.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
 function Set-WauDeadlineLeafValues {
     param([string]$Path, $App, [datetime]$FirstDetected, [datetime]$Deadline, [string]$AvailableVersion)
     New-Item -Path $Path -Force | Out-Null
@@ -50,6 +68,144 @@ function Set-WauDeadlineLeafValues {
     Set-ItemProperty -LiteralPath $Path -Name IdentityKey -Value (Get-WauAppKey $App)
 }
 
+# Move the current ID\machine and ID\user\SID layout below the recorded
+# WinGet source. Copy and verify first; never restart the existing deadline.
+function Move-WauDeadlineScopeChildren {
+    param([string]$DeadlineRegPath)
+    foreach ($packageKey in @(Get-ChildItem -LiteralPath $DeadlineRegPath -ErrorAction SilentlyContinue)) {
+        if ($packageKey.PSChildName -notmatch '^[A-Za-z0-9][A-Za-z0-9._+\-]{0,255}$') { continue }
+        $legacyLeaves = @()
+        $machinePath = Join-Path $packageKey.PSPath 'machine'
+        $userPath = Join-Path $packageKey.PSPath 'user'
+        if (Test-Path -LiteralPath $machinePath) {
+            $legacyLeaves += Get-Item -LiteralPath $machinePath
+        }
+        if (Test-Path -LiteralPath $userPath) {
+            $legacyLeaves += @(Get-ChildItem -LiteralPath $userPath -ErrorAction SilentlyContinue |
+                Where-Object { $_.PSChildName -match '^S-1-(?:5-21|12-1)-\d+-\d+-\d+-\d+$' })
+        }
+        foreach ($leaf in $legacyLeaves) {
+            $props = Get-ItemProperty -LiteralPath $leaf.PSPath -ErrorAction SilentlyContinue
+            if (-not $props.FirstDetected -or -not $props.Deadline) { continue }
+            $scope = if ($leaf.PSChildName -eq 'machine') { 'machine' } else { 'user' }
+            $sid = if ($scope -eq 'user') { [string]$leaf.PSChildName } else { '' }
+            $app = [pscustomobject]@{
+                Id= $(if ($props.PackageId) { [string]$props.PackageId } else { [string]$packageKey.PSChildName })
+                Source= $(if ($props.Source) { [string]$props.Source } else { 'winget' })
+                Scope=$scope; UserSid=$sid
+            }
+            try {
+                $first = [datetime]::MinValue
+                $due = [datetime]::MinValue
+                if (-not [datetime]::TryParse([string]$props.FirstDetected, [ref]$first) -or
+                    -not [datetime]::TryParse([string]$props.Deadline, [ref]$due)) {
+                    throw 'Invalid deadline date.'
+                }
+                $destination = Get-WauDeadlineRegistryPath -App $app -DeadlineRegPath $DeadlineRegPath
+                $existing = Get-ItemProperty -LiteralPath $destination -ErrorAction SilentlyContinue
+                if ($existing) {
+                    $existingFirst = [datetime]::MaxValue
+                    $existingDue = [datetime]::MaxValue
+                    if ([datetime]::TryParse([string]$existing.FirstDetected, [ref]$existingFirst) -and $existingFirst -lt $first) {
+                        $first = $existingFirst
+                    }
+                    if ([datetime]::TryParse([string]$existing.Deadline, [ref]$existingDue) -and $existingDue -lt $due) {
+                        $due = $existingDue
+                    }
+                }
+                $version = if ($props.AvailableVersion) { [string]$props.AvailableVersion } else { '' }
+                Set-WauDeadlineLeafValues -Path $destination -App $app -FirstDetected $first -Deadline $due -AvailableVersion $version
+                $check = Get-ItemProperty -LiteralPath $destination -ErrorAction Stop
+                if ($check.IdentityKey -ne (Get-WauAppKey $app) -or
+                    $check.FirstDetected -ne $first.ToString('yyyy-MM-dd HH:mm:ss') -or
+                    $check.Deadline -ne $due.ToString('yyyy-MM-dd HH:mm:ss')) {
+                    throw 'Source-level deadline verification failed.'
+                }
+                Remove-Item -LiteralPath $leaf.PSPath -Recurse -Force -ErrorAction Stop
+                Write-ToLog "Deadline registry source migrated: $($app.Id) / $($app.Source) / $scope"
+            }
+            catch {
+                Write-ToLog "Deadline source migration failed for $($app.Id): $_" 'Yellow'
+            }
+        }
+        if ((Test-Path -LiteralPath $userPath) -and
+            -not @(Get-ChildItem -LiteralPath $userPath -ErrorAction SilentlyContinue).Count) {
+            Remove-Item -LiteralPath $userPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+function Convert-WauDeadlineRegistryLayout {
+    param([array]$Apps, [string]$DeadlineRegPath = 'HKLM:\SOFTWARE\Romanitho\Winget-AutoUpdate\UpdateDeadlines')
+    if (-not (Test-Path -LiteralPath $DeadlineRegPath)) { return }
+    Move-WauDeadlineScopeChildren -DeadlineRegPath $DeadlineRegPath
+
+    # Snapshot direct children only. New package/scope leaves created during this
+    # pass must never be considered legacy input in the same run.
+    foreach ($entry in @(Get-ChildItem -LiteralPath $DeadlineRegPath -ErrorAction SilentlyContinue)) {
+        $props = Get-ItemProperty -LiteralPath $entry.PSPath -ErrorAction SilentlyContinue
+        if (-not $props.FirstDetected -or -not $props.Deadline) { continue }
+
+        $packageId = if ($props.PackageId) { [string]$props.PackageId } else { [string]$entry.PSChildName }
+        $matches = @($Apps | Where-Object {
+            $_.Id -eq $packageId -and
+            (-not $props.Scope -or $_.Scope -eq $props.Scope) -and
+            (-not $props.UserSid -or $_.UserSid -eq $props.UserSid) -and
+            (-not $props.Source -or $_.Source -eq $props.Source)
+        })
+        if (-not $matches.Count) {
+            Remove-WauLegacyDeadlineEntry -Entry $entry
+            Write-ToLog "Deadline purged during registry migration (app no longer outdated): $packageId"
+            continue
+        }
+
+        $first = [datetime]::MinValue
+        $due = [datetime]::MinValue
+        if (-not [datetime]::TryParse([string]$props.FirstDetected, [ref]$first) -or
+            -not [datetime]::TryParse([string]$props.Deadline, [ref]$due)) {
+            Remove-WauLegacyDeadlineEntry -Entry $entry
+            Write-ToLog "Deadline purged during registry migration (invalid dates): $packageId" 'Yellow'
+            continue
+        }
+
+        $migrated = $true
+        foreach ($app in $matches) {
+            try {
+                $destination = Get-WauDeadlineRegistryPath -App $app -DeadlineRegPath $DeadlineRegPath
+                $existing = Get-ItemProperty -LiteralPath $destination -ErrorAction SilentlyContinue
+                $mergedFirst = $first
+                $mergedDue = $due
+                if ($existing) {
+                    $existingFirst = [datetime]::MaxValue
+                    $existingDue = [datetime]::MaxValue
+                    if ([datetime]::TryParse([string]$existing.FirstDetected, [ref]$existingFirst) -and $existingFirst -lt $mergedFirst) {
+                        $mergedFirst = $existingFirst
+                    }
+                    if ([datetime]::TryParse([string]$existing.Deadline, [ref]$existingDue) -and $existingDue -lt $mergedDue) {
+                        $mergedDue = $existingDue
+                    }
+                }
+                $version = if ($props.AvailableVersion) { [string]$props.AvailableVersion } else { [string]$app.AvailableVersion }
+                Set-WauDeadlineLeafValues -Path $destination -App $app -FirstDetected $mergedFirst -Deadline $mergedDue -AvailableVersion $version
+
+                $check = Get-ItemProperty -LiteralPath $destination -ErrorAction Stop
+                if ($check.IdentityKey -ne (Get-WauAppKey $app) -or $check.PackageId -ne $app.Id -or $check.Scope -ne $app.Scope) {
+                    throw 'Migrated deadline verification failed.'
+                }
+            }
+            catch {
+                $migrated = $false
+                Write-ToLog "Deadline migration failed for $packageId`: $_" 'Yellow'
+                break
+            }
+        }
+        if (-not $migrated) { continue }
+
+        # Delete legacy input only after every matching scope/user leaf was
+        # written and verified successfully.
+        Remove-WauLegacyDeadlineEntry -Entry $entry
+        Write-ToLog "Deadline registry entry migrated: $packageId"
+    }
+}
 function Get-WauCleanAppName ($Name, $Version) {
     $clean = [string]$Name
     if ($Version) {
@@ -236,6 +392,181 @@ function Set-WauScopePlan {
     return $App
 }
 
+function Get-WauAccentPalette {
+    param([string]$UserSid)
+
+    $colorValue = $null
+    $paths = @()
+    if ($UserSid) { $paths += "Registry::HKEY_USERS\$UserSid\Software\Microsoft\Windows\DWM" }
+    $paths += 'HKCU:\Software\Microsoft\Windows\DWM'
+    foreach ($path in $paths) {
+        try {
+            $colorValue = (Get-ItemProperty -LiteralPath $path -Name ColorizationColor -ErrorAction Stop).ColorizationColor
+            if ($null -ne $colorValue) { break }
+        }
+        catch { }
+    }
+
+    $red = 0; $green = 120; $blue = 212
+    if ($null -ne $colorValue) {
+        try {
+            $raw = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int32]$colorValue), 0)
+            $red = [int](($raw -shr 16) -band 0xFF)
+            $green = [int](($raw -shr 8) -band 0xFF)
+            $blue = [int]($raw -band 0xFF)
+        }
+        catch { $red = 0; $green = 120; $blue = 212 }
+    }
+
+    $makeColor = {
+        param([double]$factor, [bool]$towardWhite)
+        $target = if ($towardWhite) { 255 } else { 0 }
+        $r = [int][Math]::Round($red + (($target - $red) * $factor))
+        $g = [int][Math]::Round($green + (($target - $green) * $factor))
+        $b = [int][Math]::Round($blue + (($target - $blue) * $factor))
+        return '#{0:X2}{1:X2}{2:X2}' -f $r, $g, $b
+    }
+    $luminance = (0.299 * $red) + (0.587 * $green) + (0.114 * $blue)
+    return [pscustomobject]@{
+        Base = '#{0:X2}{1:X2}{2:X2}' -f $red, $green, $blue
+        Hover = & $makeColor 0.12 $true
+        Pressed = & $makeColor 0.16 $false
+        Text = if ($luminance -gt 160) { '#000000' } else { '#FFFFFF' }
+    }
+}
+function Show-WauScopeMigrationPrompt {
+    param($App, [string]$DisplayName)
+
+    Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase -ErrorAction Stop
+    if (-not ('Wau.Native.MigrationTheme' -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+namespace Wau.Native {
+    public static class MigrationTheme {
+        [DllImport("dwmapi.dll", PreserveSig = true)]
+        public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
+        public static void SetDarkTitleBar(IntPtr hwnd, bool enabled) {
+            int value = enabled ? 1 : 0;
+            if (DwmSetWindowAttribute(hwnd, 20, ref value, sizeof(int)) != 0)
+                DwmSetWindowAttribute(hwnd, 19, ref value, sizeof(int));
+        }
+    }
+}
+"@ -ErrorAction Stop
+    }
+
+    $dark = $false
+    $themePaths = @()
+    if ($App.UserSid) {
+        $themePaths += "Registry::HKEY_USERS\$($App.UserSid)\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+    }
+    $themePaths += 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+    foreach ($themePath in $themePaths) {
+        try {
+            $value = (Get-ItemProperty -LiteralPath $themePath -Name AppsUseLightTheme -ErrorAction Stop).AppsUseLightTheme
+            $dark = $value -eq 0
+            break
+        }
+        catch { }
+    }
+
+    $accent = Get-WauAccentPalette -UserSid $App.UserSid
+    if ($dark) {
+        $windowBg = '#202124'; $cardBg = '#292A2D'; $border = '#3C4043'
+        $primary = '#F1F3F4'; $secondary = '#BDC1C6'; $muted = '#9AA0A6'
+        $warningBg = '#332B1D'; $warningBorder = '#765B22'; $cancelBg = '#303134'
+    }
+    else {
+        $windowBg = '#F7F8FA'; $cardBg = '#FFFFFF'; $border = '#DADCE0'
+        $primary = '#202124'; $secondary = '#5F6368'; $muted = '#70757A'
+        $warningBg = '#FFF7E0'; $warningBorder = '#F1C75B'; $cancelBg = '#EEF0F2'
+    }
+
+    [xml]$xaml = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Winget Auto Update" Width="590" SizeToContent="Height"
+        ResizeMode="NoResize" WindowStartupLocation="CenterScreen"
+        Topmost="True" ShowInTaskbar="True" Background="$windowBg"
+        FontFamily="Segoe UI Variable Display, Segoe UI">
+  <Grid Margin="22">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+    <Border Grid.Row="0" Background="$cardBg" BorderBrush="$border" BorderThickness="1"
+            CornerRadius="10" Padding="18" Margin="0,0,0,14">
+      <Grid>
+        <Grid.ColumnDefinitions><ColumnDefinition Width="48"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+        <Border Width="38" Height="38" CornerRadius="8" Background="$($accent.Base)" VerticalAlignment="Top">
+          <TextBlock Text="&#x2197;" Foreground="White" FontSize="23" FontWeight="SemiBold"
+                     HorizontalAlignment="Center" VerticalAlignment="Center"/>
+        </Border>
+        <StackPanel Grid.Column="1" Margin="13,0,0,0">
+          <TextBlock Text="Change installation scope" Foreground="$primary" FontSize="18" FontWeight="SemiBold"/>
+          <TextBlock Name="PackageText" Foreground="$secondary" FontSize="13" Margin="0,5,0,0" TextWrapping="Wrap"/>
+          <Border Background="$($accent.Base)" CornerRadius="10" Padding="10,4" Margin="0,12,0,0" HorizontalAlignment="Left">
+            <TextBlock Text="User  &#x2192;  Machine" Foreground="White" FontSize="12" FontWeight="SemiBold"/>
+          </Border>
+        </StackPanel>
+      </Grid>
+    </Border>
+    <TextBlock Grid.Row="1" Name="ExplanationText" Foreground="$secondary" FontSize="13"
+               TextWrapping="Wrap" LineHeight="19" Margin="3,0,3,14"/>
+    <Border Grid.Row="2" Background="$warningBg" BorderBrush="$warningBorder" BorderThickness="1"
+            CornerRadius="8" Padding="13" Margin="0,0,0,18">
+      <Grid>
+        <Grid.ColumnDefinitions><ColumnDefinition Width="24"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+        <TextBlock Text="!" Foreground="#E37400" FontWeight="Bold" FontSize="16"/>
+        <TextBlock Grid.Column="1" Name="WarningText" Foreground="$muted" FontSize="12"
+                   TextWrapping="Wrap" LineHeight="18"/>
+      </Grid>
+    </Border>
+    <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right">
+      <Button Name="CancelButton" Content="Skip" MinWidth="110" Height="36" Margin="0,0,9,0"
+              Background="$cancelBg" Foreground="$primary" BorderBrush="$border" BorderThickness="1"
+              Padding="14,5" Cursor="Hand" IsCancel="True"/>
+      <Button Name="ApproveButton" Content="Install with administrator privileges" MinWidth="245" Height="36"
+              Background="$($accent.Base)" Foreground="$($accent.Text)" BorderThickness="0"
+              Padding="16,5" Cursor="Hand" IsDefault="True"/>
+    </StackPanel>
+  </Grid>
+</Window>
+"@
+
+    $reader = New-Object System.Xml.XmlNodeReader $xaml
+    $window = [Windows.Markup.XamlReader]::Load($reader)
+    if ([string]::IsNullOrWhiteSpace($DisplayName)) { $DisplayName = Get-WauCleanAppName $App.Name $App.Version }
+    $window.FindName('PackageText').Text = "$DisplayName $($App.AvailableVersion) can no longer be updated as a user-scoped installation."
+    $window.FindName('WarningText').Text = 'The existing user-scoped installation and personal data will not be removed automatically. Depending on the application, both installations may remain installed.'
+
+    $runsAsSystem = [Security.Principal.WindowsIdentity]::GetCurrent().IsSystem
+    if ($runsAsSystem) {
+        # ServiceUI makes the SYSTEM-owned dialog visible in the user session.
+        # No elevation is required because the protected worker already owns it.
+        $window.FindName('ExplanationText').Text = 'The new version supports only a machine-scoped installation for all users. Confirm that Winget Auto Update may install this version for all users.'
+        $window.FindName('ApproveButton').Content = 'Install for all users'
+    }
+    else {
+        $window.FindName('ExplanationText').Text = 'The new version supports only a machine-scoped installation for all users. Windows will request administrator privileges through User Account Control (UAC).'
+        $window.FindName('ApproveButton').Content = 'Install with administrator privileges'
+    }
+
+    $approved = $false
+    $window.FindName('ApproveButton').Add_Click({ $script:WauMigrationApproved = $true; $window.DialogResult = $true })
+    $window.FindName('CancelButton').Add_Click({ $script:WauMigrationApproved = $false; $window.DialogResult = $false })
+    $window.Add_SourceInitialized({
+        $handle = (New-Object Windows.Interop.WindowInteropHelper $window).Handle
+        [Wau.Native.MigrationTheme]::SetDarkTitleBar($handle, $dark)
+    })
+    $window.Add_Loaded({ $window.Activate(); $window.Topmost = $true })
+    $script:WauMigrationApproved = $false
+    $null = $window.ShowDialog()
+    $approved = $script:WauMigrationApproved
+    Remove-Variable WauMigrationApproved -Scope Script -ErrorAction SilentlyContinue
+    return [bool]$approved
+}
 function Select-WauApprovedUpdates {
     param([array]$Apps, [scriptblock]$ConfirmMigration)
     foreach ($item in $Apps) {
@@ -251,20 +582,112 @@ function Select-WauApprovedUpdates {
     }
 }
 
+function Get-WauActiveSessionIds {
+    if (-not ('Wau.Native.WtsApi' -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+namespace Wau.Native {
+    public enum WtsConnectState { Active, Connected, ConnectQuery, Shadow, Disconnected, Idle, Listen, Reset, Down, Init }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct WtsSessionInfo {
+        public Int32 SessionId;
+        public IntPtr StationName;
+        public WtsConnectState State;
+    }
+    public static class WtsApi {
+        [DllImport("wtsapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        public static extern bool WTSEnumerateSessions(IntPtr server, Int32 reserved, Int32 version, out IntPtr sessions, out Int32 count);
+        [DllImport("wtsapi32.dll")]
+        public static extern void WTSFreeMemory(IntPtr memory);
+        [DllImport("kernel32.dll")]
+        public static extern UInt32 WTSGetActiveConsoleSessionId();
+    }
+}
+"@ -ErrorAction Stop
+    }
+
+    $buffer = [IntPtr]::Zero
+    $count = 0
+    try {
+        if (-not [Wau.Native.WtsApi]::WTSEnumerateSessions([IntPtr]::Zero, 0, 1, [ref]$buffer, [ref]$count)) {
+            return @()
+        }
+        $size = [Runtime.InteropServices.Marshal]::SizeOf([type][Wau.Native.WtsSessionInfo])
+        $active = @()
+        for ($index = 0; $index -lt $count; $index++) {
+            $pointer = [IntPtr]::Add($buffer, $index * $size)
+            $entry = [Runtime.InteropServices.Marshal]::PtrToStructure($pointer, [type][Wau.Native.WtsSessionInfo])
+            if ($entry.State -eq [Wau.Native.WtsConnectState]::Active -and $entry.SessionId -gt 0) {
+                $active += [int]$entry.SessionId
+            }
+        }
+        return @($active | Select-Object -Unique)
+    }
+    finally {
+        if ($buffer -ne [IntPtr]::Zero) { [Wau.Native.WtsApi]::WTSFreeMemory($buffer) }
+    }
+}
+
 function Get-WauInteractiveUser {
     $session = [Diagnostics.Process]::GetCurrentProcess().SessionId
-    if ($session -eq 0) {
-        $explorers = @(Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" | Where-Object { $_.SessionId -gt 0 })
+    $explorers = @(Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction SilentlyContinue)
+    if ($session -ne 0) {
+        $candidates = @($explorers | Where-Object { $_.SessionId -eq $session })
     }
     else {
-        $explorers = @(Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" | Where-Object { $_.SessionId -eq $session })
+        try { $activeSessions = @(Get-WauActiveSessionIds) } catch { $activeSessions = @() }
+        $candidates = @($explorers | Where-Object { $_.SessionId -in $activeSessions })
+        $candidateSessions = @($candidates | ForEach-Object SessionId | Select-Object -Unique)
+
+        if ($candidateSessions.Count -gt 1) {
+            $consoleSession = [Wau.Native.WtsApi]::WTSGetActiveConsoleSessionId()
+            if ($consoleSession -ne [uint32]::MaxValue -and [int]$consoleSession -in $candidateSessions) {
+                $candidates = @($candidates | Where-Object { $_.SessionId -eq [int]$consoleSession })
+            }
+            else {
+                Write-ToLog 'Multiple active interactive sessions detected; user selection is ambiguous.' 'Yellow'
+                return $null
+            }
+        }
+        elseif ($candidateSessions.Count -eq 0) {
+            # Compatibility fallback when WTS enumeration is unavailable: accept
+            # only one unambiguous Explorer session, never an arbitrary first one.
+            $allSessions = @($explorers | Where-Object { $_.SessionId -gt 0 } | ForEach-Object SessionId | Select-Object -Unique)
+            if ($allSessions.Count -ne 1) { return $null }
+            $candidates = @($explorers | Where-Object { $_.SessionId -eq $allSessions[0] })
+        }
     }
-    if (-not $explorers) { return $null }
-    $owner = Invoke-CimMethod -InputObject $explorers[0] -MethodName GetOwnerSid
+    if (-not $candidates) { return $null }
+    $owner = Invoke-CimMethod -InputObject $candidates[0] -MethodName GetOwnerSid
     if ($owner.ReturnValue -eq 0) { return $owner.Sid }
     return $null
 }
 
+function Get-WauInteractiveSessionId {
+    param([Parameter(Mandatory=$true)][string]$UserSid)
+    if ($UserSid -notmatch '^S-1-(?:5-21|12-1)-\d+-\d+-\d+-\d+$') { return $null }
+
+    $activeSessions = @()
+    try { $activeSessions = @(Get-WauActiveSessionIds) } catch { }
+    $explorers = @(Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction SilentlyContinue)
+    $matchingSessions = @()
+    foreach ($explorer in $explorers) {
+        if ($activeSessions.Count -and $explorer.SessionId -notin $activeSessions) { continue }
+        $owner = Invoke-CimMethod -InputObject $explorer -MethodName GetOwnerSid -ErrorAction SilentlyContinue
+        if ($owner.ReturnValue -eq 0 -and $owner.Sid -eq $UserSid) { $matchingSessions += [int]$explorer.SessionId }
+    }
+    $matchingSessions = @($matchingSessions | Where-Object { $_ -gt 0 } | Select-Object -Unique)
+    if ($matchingSessions.Count -eq 1) { return [int]$matchingSessions[0] }
+    if ($matchingSessions.Count -gt 1) {
+        $currentSession = [Diagnostics.Process]::GetCurrentProcess().SessionId
+        if ($currentSession -gt 0 -and $currentSession -in $matchingSessions) { return [int]$currentSession }
+        $consoleSession = [Wau.Native.WtsApi]::WTSGetActiveConsoleSessionId()
+        if ($consoleSession -ne [uint32]::MaxValue -and [int]$consoleSession -in $matchingSessions) { return [int]$consoleSession }
+        Write-ToLog "Multiple active sessions found for $UserSid; refusing ambiguous launch." 'Yellow'
+    }
+    return $null
+}
 function Write-WauAtomicJson {
     param([string]$Path, $Value)
     $temporary = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
@@ -310,6 +733,7 @@ function Invoke-WauUserOperation {
             $userTask = Get-ScheduledTask -TaskName 'Winget-AutoUpdate-UserContext' -TaskPath '\WAU\' -ErrorAction Stop
         }
         if ($userTask.State -eq 'Running') { throw 'The fixed WAU user task is still busy.' }
+
         Start-ScheduledTask -InputObject $userTask -ErrorAction Stop
         $responsePath = Join-Path $responseDir.FullName 'result.json'
         $watch = [Diagnostics.Stopwatch]::StartNew()
