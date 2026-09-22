@@ -209,29 +209,49 @@ Write-Host "  Found .NET SDK: $dotnetVer" -ForegroundColor Green
 # ---------------------------------------------------------------------------
 Write-Host "`n[2/5] Checking WiX Toolset v5..." -ForegroundColor Yellow
 Update-SessionEnvironmentPath
-$wix = Get-Command "wix" -ErrorAction SilentlyContinue
 
-if (-not $wix) {
-    Write-Host "  WiX CLI tool not found. Installing WiX v5.0.1 globally via dotnet tool..." -ForegroundColor DarkYellow
-    try {
-        & dotnet tool install --global wix --version 5.0.1
+# WiX extensions also use NuGet. A missing source must be fixed before either
+# the CLI or its extensions can be installed.
+$nugetSources = @(& dotnet nuget list source --format Short 2>&1)
+if ($LASTEXITCODE -ne 0) {
+    throw "Unable to read NuGet sources for the current user. Check access to NuGet.Config and run 'dotnet nuget list source' in this terminal."
+}
+if (-not @($nugetSources | Where-Object { "$_" -match '^\s*E\s+\S' }).Count) {
+    if (@($nugetSources | Where-Object { "$_" -match '^\s*D\s+\S' }).Count) {
+        throw "All NuGet sources are disabled. Enable your approved source before building."
     }
-    catch {
-        # If already installed or failed, try update
-        & dotnet tool update --global wix --version 5.0.1 -ErrorAction SilentlyContinue
+    Write-Host "  No NuGet source configured for this user. Adding nuget.org..." -ForegroundColor DarkYellow
+    & dotnet nuget add source 'https://api.nuget.org/v3/index.json' --name nuget.org
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to add nuget.org as a NuGet source. Configure an approved source and retry."
+    }
+    $nugetSources = @(& dotnet nuget list source --format Short 2>&1)
+    if ($LASTEXITCODE -ne 0 -or -not @($nugetSources | Where-Object { "$_" -match '^\s*E\s+\S' }).Count) {
+        throw "No enabled NuGet source is visible after adding nuget.org."
+    }
+}
+
+$wix = Get-Command "wix" -ErrorAction SilentlyContinue
+if (-not $wix) {
+    $globalTools = @(& dotnet tool list --global 2>&1)
+    if ($LASTEXITCODE -ne 0) { throw "Unable to inspect .NET global tools for the current user." }
+    $toolAction = if (@($globalTools | Where-Object { "$_" -match '^\s*wix\s+\S' }).Count) { 'update' } else { 'install' }
+    Write-Host "  WiX CLI tool not found. Running 'dotnet tool $toolAction --global wix --version 5.0.1'..." -ForegroundColor DarkYellow
+    & dotnet tool $toolAction --global wix --version 5.0.1
+    if ($LASTEXITCODE -ne 0) {
+        throw "WiX $toolAction failed. Check the NuGet error above; the PATH is not the cause until installation succeeds."
     }
 
     Update-SessionEnvironmentPath
     $wix = Get-Command "wix" -ErrorAction SilentlyContinue
     if (-not $wix) {
         $toolsFolder = [System.IO.Path]::Combine($env:USERPROFILE, '.dotnet', 'tools')
-        Write-Error "WiX installation completed, but 'wix' executable was not found in PATH.`nPlease add '$toolsFolder' to your PATH or restart your terminal."
-        exit 1
+        throw "WiX installation succeeded, but wix.exe is not visible for this user. Check '$toolsFolder' and the current process PATH."
     }
 }
 $wixVersion = & wix --version
+if ($LASTEXITCODE -ne 0) { throw "WiX CLI could not start for the current user." }
 Write-Host "  Found WiX CLI version: $wixVersion" -ForegroundColor Green
-
 # ---------------------------------------------------------------------------
 # 3. Ensure WiX Extensions (Util & UI) are registered
 # ---------------------------------------------------------------------------
