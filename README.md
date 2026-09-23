@@ -120,7 +120,10 @@ Install Winget-AutoUpdate and prerequisites silently.
 Default value NO. Set `RUN_WAU=YES` to run WAU just after installation.
 
 ### DISABLEWAUAUTOUPDATE
-Default value 0. Set `DISABLEWAUAUTOUPDATE=1` to disable Winget-AutoUpdate self update checking. By default, WAU auto updates if new version is available on Github.
+Default value `1`. Winget-AutoUpdate self-updates are disabled by default (`DISABLEWAUAUTOUPDATE=1`) for security reasons.
+Pulling updates directly from GitHub introduces supply-chain risks. 
+By keeping this setting disabled, you prevent potentially compromised releases from being automatically deployed to your endpoints if the upstream repository or release pipeline is breached. Set `DISABLEWAUAUTOUPDATE=0` only if you explicitly want WAU to update itself automatically from GitHub without prior internal testing or approval.
+
 
 ### USEWHITELIST
 Set `USEWHITELIST=1` to force WAU to use WhiteList. During installation, if a whitelist is provided, this setting is automatically set to 1.
