@@ -26,7 +26,7 @@ jobs:
     steps:
       # Step 1: Calculate the next version number based on the selected increment type
       - name: Auto Increment Semver Action
-        uses: MCKanpolat/auto-semver-action@b8d990235cabc199538f9d0ac9ff485acdeb7b96 # 3
+        uses: MCKanpolat/auto-semver-action@632a84f5d1232fe655c7a85684ba3105c28b3fec # 1.0.11
         id: versioning
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -35,7 +35,7 @@ jobs:
 
       # Step 2: Checkout the develop branch which contains all approved features
       - name: Checkout code
-        uses: actions/checkout@v7
+        uses: actions/checkout@v6
         with:
           ref: develop  # Always create releases from develop branch
           fetch-depth: 0
