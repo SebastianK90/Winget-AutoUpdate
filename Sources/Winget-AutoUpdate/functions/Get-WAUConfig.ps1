@@ -19,14 +19,7 @@ Function Get-WAUConfig {
     $GPO = Get-ItemProperty "HKLM:\SOFTWARE\Policies\Romanitho\Winget-AutoUpdate" -ErrorAction SilentlyContinue
     if ($GPO) {
         Write-ToLog "GPO policies detected - applying" "Yellow"
-        $GPO.PSObject.Properties | ForEach-Object {
-            if ($WAUConfig.PSObject.Properties.Match($_.Name).Count) {
-                $WAUConfig.$($_.Name) = $_.Value
-            }
-            else {
-                $WAUConfig.PSObject.Properties.Add($_)
-            }
-        }
+        $GPO.PSObject.Properties | ForEach-Object { $WAUConfig.PSObject.Properties.add($_) }
     }
 
     return $WAUConfig

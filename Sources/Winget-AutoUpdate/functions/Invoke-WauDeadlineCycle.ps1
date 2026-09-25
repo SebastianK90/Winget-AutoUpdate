@@ -64,21 +64,63 @@ function Invoke-WauDeadlineCycle {
         }
     }
     $promptApps = @()
+    $expiredUserApps = @()
     foreach ($app in $apps) {
         $entry = $deadlines | Where-Object { $_.AppId -eq $app.Key } | Select-Object -First 1
         if (-not $entry) { continue }
-        if ($app.CanUpdate -and $app.Scope -eq 'machine' -and $app.Version -ne 'Unknown' -and $entry.Deadline -lt (Get-Date)) {
-            $before = $Script:InstallOK
-            Update-App $app -src $app.Source
-            if ($Script:InstallOK -gt $before) {
-                Remove-WauUpdateDeadline -App $app
+        $isOverdue = $entry.Deadline -lt (Get-Date)
+        if ($app.CanUpdate -and $app.Version -ne 'Unknown' -and $isOverdue) {
+            if ($app.Scope -eq 'machine') {
+                $before = $Script:InstallOK
+                Update-App $app -src $app.Source
+                if ($Script:InstallOK -gt $before) {
+                    Remove-WauUpdateDeadline -App $app
+                    continue
+                }
+            }
+            elseif ($app.Scope -eq 'user' -and $userSid -and $app.UserSid -eq $userSid -and
+                    -not $app.RequiresScopeMigration) {
+                # User-scoped WinGet packages must be updated with the owning user's
+                # token. Queue them for the fixed user-context worker instead of
+                # attempting the update as SYSTEM. Scope migrations remain an
+                # explicit GUI choice because they change installation identity.
+                $app | Add-Member NoteProperty Deadline ($entry.Deadline.ToString('yyyy-MM-dd HH:mm:ss')) -Force
+                $expiredUserApps += $app
                 continue
             }
         }
         $app | Add-Member NoteProperty Deadline ($entry.Deadline.ToString('yyyy-MM-dd HH:mm:ss')) -Force
         $promptApps += $app
     }
-    if (-not $userSid -or -not $promptApps.Count) { return }
+
+    if (@($expiredUserApps).Count -gt 0) {
+        try {
+            Write-ToLog "Installing $($expiredUserApps.Count) overdue user-scoped update(s) for $userSid"
+            $completed = @(Invoke-WauUserOperation -Operation Update -UserSid $userSid `
+                -Apps $expiredUserApps -TimeoutSeconds 10800)
+            foreach ($app in $expiredUserApps) {
+                # The worker response is user-writable. Accept completion only when
+                # both identity fields match an update that SYSTEM actually queued.
+                $confirmed = @($completed | Where-Object {
+                    $_.Key -eq $app.Key -and $_.Id -eq $app.Id
+                }).Count -gt 0
+                if ($confirmed) {
+                    Remove-WauUpdateDeadline -App $app
+                    Write-ToLog "Overdue user update completed: $($app.Id)"
+                }
+                else {
+                    Write-ToLog "Overdue user update was not completed: $($app.Id)" 'Yellow'
+                    $promptApps += $app
+                }
+            }
+        }
+        catch {
+            Write-ToLog "Overdue user update delegation failed: $_" 'Yellow'
+            # Preserve every deadline and fall back to the interactive prompt.
+            $promptApps += $expiredUserApps
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($userSid) -or @($promptApps).Count -eq 0) { return }
     $reg = 'HKLM:\SOFTWARE\Romanitho\Winget-AutoUpdate'
     $next = (Get-ItemProperty $reg -Name NextPromptTime -ErrorAction SilentlyContinue).NextPromptTime
     $date = [datetime]::MinValue
