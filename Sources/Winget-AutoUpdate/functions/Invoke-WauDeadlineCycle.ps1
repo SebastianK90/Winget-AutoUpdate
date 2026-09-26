@@ -48,6 +48,11 @@ function Invoke-WauDeadlineCycle {
     foreach ($app in $apps) {
         $app | Add-Member NoteProperty BlockReason (Get-WauBlockReason $app) -Force
         $app | Add-Member NoteProperty CanUpdate ([string]::IsNullOrEmpty($app.BlockReason)) -Force
+        if ($app.BlockReason -in @('Excluded by policy/list', 'Not in allowlist')) {
+            Remove-WauUpdateDeadline -App $app
+            Write-ToLog "$($app.Name): $($app.BlockReason); existing deadline removed" 'Gray'
+            continue
+        }
         $null = Set-WauScopePlan -App $app -Source $app.Source
         if ($app.InstallerSupport -eq 'Unavailable' -and -not $app.RequiresScopeMigration) {
             $app.BlockReason = 'No compatible installer for existing scope'
