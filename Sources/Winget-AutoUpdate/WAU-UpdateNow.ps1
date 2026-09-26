@@ -50,6 +50,25 @@ if (-not [string]::IsNullOrWhiteSpace($Script:WAUConfig.WAU_WingetSourceCustom))
     $Script:WingetSourceCustom = $Script:WAUConfig.WAU_WingetSourceCustom.Trim()
 }
 
+# Successful requests are deleted immediately below. Retain failed/legacy audit
+# records for a limited time and remove abandoned running claims separately.
+$requestConfigPath = Join-Path $Script:WorkingDir 'config'
+$cleanupRules = @(
+    [pscustomobject]@{ Pattern = 'update-completed-*.json'; Cutoff = [datetime]::UtcNow.AddDays(-30) }
+    [pscustomobject]@{ Pattern = 'update-failed-*.json';    Cutoff = [datetime]::UtcNow.AddDays(-30) }
+    [pscustomobject]@{ Pattern = 'update-running-*.json';   Cutoff = [datetime]::UtcNow.AddHours(-24) }
+)
+$removedArtifacts = 0
+foreach ($rule in $cleanupRules) {
+    Get-ChildItem -LiteralPath $requestConfigPath -File -Filter $rule.Pattern -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTimeUtc -lt $rule.Cutoff } |
+        ForEach-Object {
+            Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+            if (-not (Test-Path -LiteralPath $_.FullName)) { $removedArtifacts++ }
+        }
+}
+if ($removedArtifacts -gt 0) { Write-ToLog "Removed $removedArtifacts expired update request artifact(s)." 'Gray' }
+
 [string]$LocaleDisplayName = Get-NotifLocale
 Write-ToLog "Notification Level: $($Script:WAUConfig.WAU_NotificationLevel). Notification Language: $LocaleDisplayName" "Cyan"
 #endregion CONTEXT AND CONFIG
@@ -72,6 +91,10 @@ if (-not (Test-Path -LiteralPath $requestPath)) { exit 0 }
 $claimedPath = Join-Path $Script:WorkingDir ('config\update-running-' + [guid]::NewGuid().ToString('N') + '.json')
 Move-Item -LiteralPath $requestPath -Destination $claimedPath -ErrorAction Stop
 $Script:InstallOK = 0
+$requestSucceeded = $false
+$requestHadFailure = $false
+$processingError = $null
+$completedKeys = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 try {
     $request = Get-Content -LiteralPath $claimedPath -Raw -Encoding UTF8 | ConvertFrom-Json
     if ([datetime]::UtcNow - [datetime]::Parse($request.CreatedUtc).ToUniversalTime() -gt [timespan]::FromHours(2)) { throw 'Update selection expired. Please scan again.' }
@@ -83,10 +106,17 @@ try {
     }
     $userSelected = @()
     foreach ($selected in @($request.Apps)) {
-        if ($selected.Key -ne (Get-WauAppKey $selected) -or $selected.Source -ne $source) { continue }
+        if ($selected.Key -ne (Get-WauAppKey $selected) -or $selected.Source -ne $source) {
+            $requestHadFailure = $true
+            continue
+        }
         if ($selected.Scope -eq 'machine') {
             $app = $freshMachine | Where-Object { $_.Key -eq $selected.Key -and $_.AvailableVersion -eq $selected.AvailableVersion } | Select-Object -First 1
-            if (-not $app) { Write-ToLog "Machine update changed/disappeared: $($selected.Id)" 'Yellow'; continue }
+            if (-not $app) {
+                Write-ToLog "Machine update changed/disappeared: $($selected.Id)" 'Yellow'
+                $requestHadFailure = $true
+                continue
+            }
         }
         elseif ($selected.Scope -eq 'user' -and $selected.UserSid -eq $request.UserSid) {
             if ($selected.TargetScope -eq 'machine' -and $selected.ScopeMigrationApproved -eq $true) {
@@ -99,36 +129,80 @@ try {
             }
             else { $userSelected += $selected; continue }
         }
-        else { Write-ToLog 'Invalid scope or user identity in update selection.' 'Red'; continue }
+        else {
+            Write-ToLog 'Invalid scope or user identity in update selection.' 'Red'
+            $requestHadFailure = $true
+            continue
+        }
         $reason = Get-WauBlockReason $app
-        if ($reason) { Write-ToLog "$($app.Id): $reason" 'Yellow'; continue }
+        if ($reason) {
+            Write-ToLog "$($app.Id): $reason" 'Yellow'
+            $requestHadFailure = $true
+            continue
+        }
         $before = $Script:InstallOK
         Update-App $app -src $source
         if ($Script:InstallOK -gt $before) {
             Remove-WauUpdateDeadline -App $app
+            $null = $completedKeys.Add([string]$selected.Key)
             if ($app.Scope -eq 'user') { Write-ToLog "Machine installation confirmed. Original user installation was retained: $($app.Id)" 'Yellow' }
         }
+        else { $requestHadFailure = $true }
     }
     if ($userSelected.Count -gt 0) {
-        $allowed = @($userSelected | Where-Object { -not (Get-WauBlockReason $_) })
+        $allowed = @()
+        foreach ($selected in $userSelected) {
+            $reason = Get-WauBlockReason $selected
+            if ($reason) {
+                Write-ToLog "$($selected.Id): $reason" 'Yellow'
+                $requestHadFailure = $true
+            }
+            else { $allowed += $selected }
+        }
         if ($allowed.Count -gt 0) {
             $completed = @(Invoke-WauUserOperation -Operation Update -UserSid $request.UserSid -Apps $allowed -TimeoutSeconds 10800)
             foreach ($entry in $completed) {
                 # A user response can only acknowledge one of its approved user updates.
                 if ($entry.Key -in @($allowed | ForEach-Object Key)) {
                     $completedApp = $allowed | Where-Object Key -eq $entry.Key | Select-Object -First 1
-                    if ($completedApp) { Remove-WauUpdateDeadline -App $completedApp }
+                    if ($completedApp) {
+                        Remove-WauUpdateDeadline -App $completedApp
+                        $null = $completedKeys.Add([string]$completedApp.Key)
+                    }
+                }
+            }
+            foreach ($selected in $allowed) {
+                if (-not $completedKeys.Contains([string]$selected.Key)) {
+                    $requestHadFailure = $true
+                    Write-ToLog "User update was not confirmed: $($selected.Id)" 'Yellow'
                 }
             }
             Write-ToLog "$($completed.Count) user updates confirmed."
         }
     }
-}
-catch { Write-ToLog "Update request failed: $_" 'Red'; exit 1 }
-finally {
-    # Keep a private audit record of the exact version/scope consent and execution.
-    Move-Item -LiteralPath $claimedPath -Destination ($claimedPath -replace 'update-running-', 'update-completed-') -Force -ErrorAction SilentlyContinue
-}
-Write-ToLog 'End of scoped update request.' 'Cyan'
 
+    $expectedKeys = @($request.Apps | ForEach-Object { [string]$_.Key } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
+    $missingKeys = @($expectedKeys | Where-Object { -not $completedKeys.Contains($_) })
+    $requestSucceeded = -not $requestHadFailure -and $missingKeys.Count -eq 0
+    if (-not $requestSucceeded) {
+        Write-ToLog 'Update request was not fully completed; retaining a failure record.' 'Yellow'
+    }
+}
+catch {
+    $processingError = $_
+    Write-ToLog "Update request failed: $_" 'Red'
+}
+finally {
+    if ($requestSucceeded) {
+        Remove-Item -LiteralPath $claimedPath -Force -ErrorAction SilentlyContinue
+        Write-ToLog 'Verified update request file removed.' 'Gray'
+    }
+    else {
+        # Keep unsuccessful consent/execution data temporarily for diagnostics.
+        Move-Item -LiteralPath $claimedPath -Destination ($claimedPath -replace 'update-running-', 'update-failed-') -Force -ErrorAction SilentlyContinue
+    }
+}
+if ($processingError) { exit 1 }
+Write-ToLog 'End of scoped update request.' 'Cyan'
 
