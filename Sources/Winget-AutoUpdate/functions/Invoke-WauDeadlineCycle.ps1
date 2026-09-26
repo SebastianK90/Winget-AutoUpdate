@@ -126,6 +126,10 @@ function Invoke-WauDeadlineCycle {
         }
     }
     if ([string]::IsNullOrWhiteSpace($userSid) -or @($promptApps).Count -eq 0) { return }
+    if (@($promptApps | Where-Object { $_.CanUpdate -or $_.BlockReason -notlike 'Deferred by policy*' }).Count -eq 0) {
+        Write-ToLog 'All pending updates are deferred; skipping the update prompt.' 'Gray'
+        return
+    }
     $reg = 'HKLM:\SOFTWARE\Romanitho\Winget-AutoUpdate'
     $next = (Get-ItemProperty $reg -Name NextPromptTime -ErrorAction SilentlyContinue).NextPromptTime
     $date = [datetime]::MinValue
