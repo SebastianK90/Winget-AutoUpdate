@@ -48,6 +48,7 @@ function Invoke-WauDeadlineCycle {
     foreach ($app in $apps) {
         $app | Add-Member NoteProperty BlockReason (Get-WauBlockReason $app) -Force
         $app | Add-Member NoteProperty CanUpdate ([string]::IsNullOrEmpty($app.BlockReason)) -Force
+        $app | Add-Member NoteProperty IsDeferred ($app.BlockReason -like 'Deferred by policy*') -Force
         if ($app.BlockReason -in @('Excluded by policy/list', 'Not in allowlist')) {
             Remove-WauUpdateDeadline -App $app
             Write-ToLog "$($app.Name): $($app.BlockReason); existing deadline removed" 'Gray'
@@ -55,7 +56,7 @@ function Invoke-WauDeadlineCycle {
         }
         $null = Set-WauScopePlan -App $app -Source $app.Source
         if ($app.InstallerSupport -eq 'Unavailable' -and -not $app.RequiresScopeMigration) {
-            $app.BlockReason = 'No compatible installer for existing scope'
+            if (-not $app.IsDeferred) { $app.BlockReason = 'No compatible installer for existing scope' }
             $app.CanUpdate = $false
         }
         Set-UpdateDeadline -App $app -DeadlineHours $DeadlineHours
@@ -103,6 +104,7 @@ function Invoke-WauDeadlineCycle {
             Write-ToLog "Installing $($expiredUserApps.Count) overdue user-scoped update(s) for $userSid"
             $completed = @(Invoke-WauUserOperation -Operation Update -UserSid $userSid `
                 -Apps $expiredUserApps -TimeoutSeconds 10800)
+            $completed = @(Confirm-WauUserUpdateResults -Apps $expiredUserApps -Completed $completed -UserSid $userSid)
             foreach ($app in $expiredUserApps) {
                 # The worker response is user-writable. Accept completion only when
                 # both identity fields match an update that SYSTEM actually queued.
@@ -126,7 +128,7 @@ function Invoke-WauDeadlineCycle {
         }
     }
     if ([string]::IsNullOrWhiteSpace($userSid) -or @($promptApps).Count -eq 0) { return }
-    if (@($promptApps | Where-Object { $_.CanUpdate -or $_.BlockReason -notlike 'Deferred by policy*' }).Count -eq 0) {
+    if (@($promptApps | Where-Object { $_.CanUpdate -or -not $_.IsDeferred }).Count -eq 0) {
         Write-ToLog 'All pending updates are deferred; skipping the update prompt.' 'Gray'
         return
     }

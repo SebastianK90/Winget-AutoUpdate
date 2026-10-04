@@ -223,6 +223,25 @@ Optional GitHub Personal Access Token to raise the API rate limit from 60 to 5,0
 - **Fine-grained PAT (Recommended):** Set Repository access to "Public Repositories (read-only)". No additional permissions needed (or "Contents: Read-only").
 - **Classic PAT:** No scopes required! Leave all checkboxes unchecked (a token without scopes allows read-only access to public data and grants the 5,000 req/h rate limit without risking any private repository or write access).
 
+GitHub tokens and Azure SAS URLs are stored in an ACL-protected `Secrets` subkey
+under the WAU configuration key. Only SYSTEM and elevated administrators can read
+them. MSI installation migrates existing values out of the public configuration
+key and masks the corresponding installer properties and policy logs.
+Deploy the updated ADMX when using these policies: their values now belong under
+`HKLM\SOFTWARE\Policies\Romanitho\Winget-AutoUpdate\Secrets`.
+The MSI provisions that policy key with the same restricted permissions.
+Installation paths must have administrator-controlled ancestors and must not
+contain reparse points. User-owned locations (for example, a user's profile)
+are rejected instead of registering SYSTEM tasks against writable scripts.
+
+WAU self-updates require a SHA-256 asset digest from the official GitHub release
+API. A missing digest or checksum mismatch prevents MSI execution. MSI exit codes
+0 and 3010 are successful; 3010 indicates that a restart is required.
+
+User-update acknowledgements are followed by a separate user-context version
+query before deadlines or request files are removed. The owning user is still
+trusted; this is not a tamper-proof attestation of a user-controlled installation.
+
 ### SHAREDCACHEPATH
 Specify a central network share folder (e.g. `\\server\share\wau\cache`) to enable decentralized peer-to-peer caching for package deferrals across corporate networks. The first client resolving an update release date saves it to the share; all other clients read from the share without querying GitHub, preventing API rate limit issues. If unreachable (e.g. laptop off VPN), clients automatically fall back to their local cache.
 

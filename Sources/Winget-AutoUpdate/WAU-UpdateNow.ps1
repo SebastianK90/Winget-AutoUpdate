@@ -161,10 +161,11 @@ try {
         }
         if ($allowed.Count -gt 0) {
             $completed = @(Invoke-WauUserOperation -Operation Update -UserSid $request.UserSid -Apps $allowed -TimeoutSeconds 10800)
+            $completed = @(Confirm-WauUserUpdateResults -Apps $allowed -Completed $completed -UserSid $request.UserSid)
             foreach ($entry in $completed) {
                 # A user response can only acknowledge one of its approved user updates.
                 if ($entry.Key -in @($allowed | ForEach-Object Key)) {
-                    $completedApp = $allowed | Where-Object Key -eq $entry.Key | Select-Object -First 1
+                    $completedApp = $allowed | Where-Object { $_.Key -eq $entry.Key -and $_.Id -eq $entry.Id } | Select-Object -First 1
                     if ($completedApp) {
                         Remove-WauUpdateDeadline -App $completedApp
                         $null = $completedKeys.Add([string]$completedApp.Key)
@@ -203,6 +204,6 @@ finally {
         Move-Item -LiteralPath $claimedPath -Destination ($claimedPath -replace 'update-running-', 'update-failed-') -Force -ErrorAction SilentlyContinue
     }
 }
-if ($processingError) { exit 1 }
+if ($processingError -or -not $requestSucceeded) { exit 1 }
 Write-ToLog 'End of scoped update request.' 'Cyan'
 

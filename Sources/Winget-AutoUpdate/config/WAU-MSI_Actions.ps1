@@ -58,6 +58,12 @@ function Install-WingetAutoUpdate {
     Write-Host "### Post install actions ###"
 
     try {
+        # Fail before registering any SYSTEM task when its scripts cannot be
+        # protected. Also normalize trailing separators used by task commands.
+        $InstallPath = [IO.Path]::GetFullPath($InstallPath).TrimEnd('\') + '\'
+        Protect-WauInstallation -Path $InstallPath
+        Protect-WauRegistrySecrets
+        Protect-WauRegistrySecrets -Root 'HKLM:\SOFTWARE\Policies\Romanitho\Winget-AutoUpdate'
         # Clean old v1 installation if present
         $OldConfRegPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Winget-AutoUpdate"
         $OldWAUConfig = Get-ItemProperty $OldConfRegPath -ErrorAction SilentlyContinue
@@ -68,8 +74,7 @@ function Install-WingetAutoUpdate {
 
         # Get WAU config from registry
         $WAUconfig = Get-ItemProperty "HKLM:\SOFTWARE\Romanitho\Winget-AutoUpdate"
-        Write-Output "-> WAU Config:"
-        Write-Output $WAUconfig
+        Write-Output "-> WAU configuration loaded (secret values omitted)."
 
         # Create scheduled tasks
         Write-Host "-> Installing WAU scheduled tasks"
@@ -165,40 +170,105 @@ function Install-WingetAutoUpdate {
             Copy-Item -Path $ModsFolder -Destination $InstallPath -Recurse
         }
 
-        # Secure folders if not in Program Files
-        if ($InstallPath -notlike "$env:ProgramFiles*") {
-            Write-Output "-> Securing functions and mods folders"
-
-            foreach ($dir in @($InstallPath, "$InstallPath\functions", "$InstallPath\mods", "$InstallPath\config")) {
-                try {
-                    $dirPath = Get-Item -Path $dir
-                    $acl = Get-Acl -Path $dirPath.FullName
-                    $acl.SetAccessRuleProtection($true, $true)
-                    $acl.Access | ForEach-Object { $acl.RemoveAccessRule($_) }
-
-                    # Add permissions: SYSTEM, Admins = Full; Users, Authenticated = ReadAndExecute
-                    Add-ACLRule -acl $acl -sid "S-1-5-18" -access "FullControl"
-                    Add-ACLRule -acl $acl -sid "S-1-5-32-544" -access "FullControl"
-                    Add-ACLRule -acl $acl -sid "S-1-5-32-545" -access "ReadAndExecute"
-                    Add-ACLRule -acl $acl -sid "S-1-5-11" -access "ReadAndExecute"
-
-                    Set-Acl -Path $dirPath.FullName -AclObject $acl
-                    Write-Host "Permissions for '$dir' updated successfully."
-                }
-                catch {
-                    Write-Host "Error setting ACL for '$dir': $($_.Exception.Message)"
-                }
-            }
-        }
+        # Reapply after imported lists/mods; copied files must not retain a
+        # writable ACL or reparse point from an external source.
+        Protect-WauInstallation -Path $InstallPath
 
         Write-Host "### WAU MSI Post actions succeeded! ###"
     }
     catch {
-        Write-Host "### WAU Installation failed! Error: $_. ###"
-        return $false
+        Write-Host "### WAU Installation failed. ###"
+        throw
     }
 }
 
+function Protect-WauRegistrySecrets {
+    param([string]$Root = 'HKLM:\SOFTWARE\Romanitho\Winget-AutoUpdate')
+    $path = Join-Path $root 'Secrets'
+    # New-Item -Force can reset an existing registry key. Preserve values
+    # already written by MSI, including during repairs and upgrades.
+    if (-not (Test-Path -LiteralPath $path)) {
+        $null = New-Item -Path $path -ErrorAction Stop
+    }
+    $acl = [Security.AccessControl.RegistrySecurity]::new()
+    $acl.SetAccessRuleProtection($true, $false)
+    $acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-18'))
+    foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
+        $acl.AddAccessRule([Security.AccessControl.RegistryAccessRule]::new(
+            [Security.Principal.SecurityIdentifier]::new($sid), 'FullControl', 'ContainerInherit', 'None', 'Allow'))
+    }
+    Set-Acl -LiteralPath $path -AclObject $acl -ErrorAction Stop
+    $legacy = Get-ItemProperty -LiteralPath $root -ErrorAction Stop
+    foreach ($name in @('WAU_GitHubToken', 'WAU_AzureBlobSASURL')) {
+        $stored = Get-ItemProperty -LiteralPath $path -Name $name -ErrorAction SilentlyContinue
+        if ($legacy.$name -and -not $stored.$name) {
+            Set-ItemProperty -LiteralPath $path -Name $name -Value $legacy.$name -ErrorAction Stop
+        }
+        if ($legacy.PSObject.Properties[$name]) {
+            Remove-ItemProperty -LiteralPath $root -Name $name -ErrorAction Stop
+        }
+    }
+}
+
+function Protect-WauInstallation {
+    param([Parameter(Mandatory=$true)][string]$Path)
+    $fullPath = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    if ($fullPath -eq [IO.Path]::GetPathRoot($fullPath).TrimEnd('\') -or
+        $fullPath -eq $env:ProgramFiles -or $fullPath -eq $env:WINDIR) {
+        throw 'Refusing to change permissions on a system or volume root.'
+    }
+    $trustedOwners = @('S-1-5-18', 'S-1-5-32-544',
+        'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+    $item = Get-Item -LiteralPath $fullPath -Force -ErrorAction Stop
+    if (-not $item.PSIsContainer) { throw 'Installation path is not a directory.' }
+    $parent = $item
+    while ($parent) {
+        if ($parent.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Reparse points are not permitted in the installation path.' }
+        if ($parent.FullName -ne $item.FullName) {
+            $parentAcl = Get-Acl -LiteralPath $parent.FullName -ErrorAction Stop
+            if ($parentAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin $trustedOwners) {
+                throw 'An installation ancestor is controlled by a non-administrator.'
+            }
+            foreach ($rule in $parentAcl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+                if ($rule.AccessControlType -eq 'Allow' -and $rule.IdentityReference.Value -notin $trustedOwners -and
+                    ($rule.FileSystemRights -band [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles)) {
+                    throw 'An installation ancestor permits untrusted users to replace child directories.'
+                }
+            }
+        }
+        $parent = $parent.Parent
+    }
+    $items = @($item) + @(Get-ChildItem -LiteralPath $fullPath -Recurse -Force -ErrorAction Stop)
+    foreach ($entry in $items) {
+        if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Reparse points are not permitted in the installation tree.' }
+    }
+    foreach ($entry in $items) {
+        $acl = if ($entry.PSIsContainer) { [Security.AccessControl.DirectorySecurity]::new() }
+               else { [Security.AccessControl.FileSecurity]::new() }
+        $acl.SetAccessRuleProtection($true, $false)
+        $acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-18'))
+        foreach ($sid in @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-32-545', 'S-1-5-11')) {
+            $rights = if ($sid -in @('S-1-5-18', 'S-1-5-32-544')) { 'FullControl' } else { 'ReadAndExecute' }
+            $inheritance = if ($entry.PSIsContainer) { 'ContainerInherit,ObjectInherit' } else { 'None' }
+            $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                [Security.Principal.SecurityIdentifier]::new($sid), $rights, $inheritance, 'None', 'Allow'))
+        }
+        Set-Acl -LiteralPath $entry.FullName -AclObject $acl -ErrorAction Stop
+        $actual = Get-Acl -LiteralPath $entry.FullName -ErrorAction Stop
+        $writeRights = [Security.AccessControl.FileSystemRights]::Write -bor
+            [Security.AccessControl.FileSystemRights]::Delete -bor
+            [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+            [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+            [Security.AccessControl.FileSystemRights]::TakeOwnership
+        foreach ($rule in $actual.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+            if ($rule.AccessControlType -eq 'Allow' -and $rule.IdentityReference.Value -notin $trustedOwners -and
+                ($rule.FileSystemRights -band $writeRights)) { throw 'Installation ACL verification failed.' }
+        }
+        if ($actual.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin $trustedOwners) {
+            throw 'Installation ownership verification failed.'
+        }
+    }
+}
 
 function Uninstall-WingetAutoUpdate {
     Write-Host "### Uninstalling WAU started! ###"
@@ -239,9 +309,11 @@ function Uninstall-WingetAutoUpdate {
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $Script:ProgressPreference = 'SilentlyContinue'
 
-if ($Uninstall) {
-    Uninstall-WingetAutoUpdate
+try {
+    if ($Uninstall) { Uninstall-WingetAutoUpdate }
+    else { Install-WingetAutoUpdate }
 }
-else {
-    Install-WingetAutoUpdate
+catch {
+    Write-Error 'WAU MSI actions failed; installation is incomplete.'
+    exit 1
 }

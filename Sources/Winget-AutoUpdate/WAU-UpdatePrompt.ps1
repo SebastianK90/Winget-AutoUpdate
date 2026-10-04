@@ -623,6 +623,7 @@ $t.PrimaryBtnText = $accent.Text#endregion THEME COLOR TOKENS
                                     BorderBrush="{DynamicResource Brush.CheckBoxBorder}"
                                     BorderThickness="1.5"
                                     Margin="0,0,6,0">
+                                <Grid>
                                 <Path x:Name="checkMark"
                                       Data="M 2.5,7.5 L 6,11 L 13,3.5"
                                       Stroke="{DynamicResource Brush.PrimaryBtnBg}"
@@ -632,12 +633,24 @@ $t.PrimaryBtnText = $accent.Text#endregion THEME COLOR TOKENS
                                       Visibility="Collapsed"
                                       HorizontalAlignment="Center"
                                       VerticalAlignment="Center"/>
+                                <Path x:Name="partialMark"
+                                      Data="M 3,8 L 12,8"
+                                      Stroke="{DynamicResource Brush.PrimaryBtnBg}"
+                                      StrokeThickness="2"
+                                      Visibility="Collapsed"
+                                      HorizontalAlignment="Center"
+                                      VerticalAlignment="Center"/>
+                                </Grid>
                             </Border>
                             <ContentPresenter VerticalAlignment="Center"/>
                         </StackPanel>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsChecked" Value="True">
                                 <Setter TargetName="checkMark" Property="Visibility" Value="Visible"/>
+                                <Setter TargetName="checkBorder" Property="BorderBrush" Value="{DynamicResource Brush.PrimaryBtnBg}"/>
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="{x:Null}">
+                                <Setter TargetName="partialMark" Property="Visibility" Value="Visible"/>
                                 <Setter TargetName="checkBorder" Property="BorderBrush" Value="{DynamicResource Brush.PrimaryBtnBg}"/>
                             </Trigger>
                             <Trigger Property="IsMouseOver" Value="True">
@@ -718,12 +731,18 @@ $t.PrimaryBtnText = $accent.Text#endregion THEME COLOR TOKENS
 
         <!-- Filter and Status Bar -->
         <Grid Grid.Row="1" Margin="2,0,2,8" Name="FilterBar">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
             <TextBlock Name="ListSummaryText"
                        FontSize="11"
                        Foreground="{DynamicResource Brush.TextMuted}"
                        VerticalAlignment="Center"/>
             <CheckBox Name="ShowBlockedCheckBox"
+                      Grid.Column="1"
                       Style="{DynamicResource FilterCheckBox}"
+                      Margin="12,0,0,0"
                       HorizontalAlignment="Right"
                       VerticalAlignment="Center"/>
         </Grid>
@@ -745,6 +764,15 @@ $t.PrimaryBtnText = $accent.Text#endregion THEME COLOR TOKENS
                     <GridView>
                         <!-- Checkbox -->
                         <GridViewColumn Width="36">
+                            <GridViewColumn.Header>
+                                <GridViewColumnHeader Padding="0" HorizontalContentAlignment="Center">
+                                    <CheckBox Name="SelectAllCheckBox"
+                                              Style="{DynamicResource FilterCheckBox}"
+                                              IsThreeState="False"
+                                              AutomationProperties.Name="Select all available updates"
+                                              ToolTip="Select all available updates. Overdue updates remain selected when clearing the selection."/>
+                                </GridViewColumnHeader>
+                            </GridViewColumn.Header>
                             <GridViewColumn.CellTemplate>
                                 <DataTemplate>
                                     <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}">
@@ -902,6 +930,7 @@ $fallbackIconCtrl = $window.FindName('FallbackIcon')
 $filterBarCtrl    = $window.FindName('FilterBar')
 $listSummaryTxt   = $window.FindName('ListSummaryText')
 $showBlockedCb    = $window.FindName('ShowBlockedCheckBox')
+$selectAllCb      = $window.FindName('SelectAllCheckBox')
 
 # Set header text with company name if configured
 if ($companyName) {
@@ -961,8 +990,14 @@ $remindBtn.Content = "Remind Me in $reminderHours $hourLabel"
 $blockedCount   = @($sortedRows | Where-Object { -not $_.CanUpdate }).Count
 $updatableCount = @($sortedRows | Where-Object { $_.CanUpdate }).Count
 
+if ($showBlockedCb) {
+    $showBlockedCb.Content = "Show blocked ($blockedCount)"
+    $showBlockedCb.IsEnabled = $blockedCount -gt 0
+    $showBlockedCb.Visibility = if ($blockedCount -gt 0) { [System.Windows.Visibility]::Visible }
+                                else { [System.Windows.Visibility]::Collapsed }
+}
 if ($blockedCount -eq 0) {
-    if ($showBlockedCb) { $showBlockedCb.Visibility = [System.Windows.Visibility]::Collapsed }
+    if ($showBlockedCb) { $showBlockedCb.IsChecked = $false }
     if ($listSummaryTxt) { $listSummaryTxt.Text = "$updatableCount update$(if ($updatableCount -ne 1) { 's' }) ready" }
     $appListCtrl.ItemsSource = $sortedRows
 }
@@ -1046,9 +1081,15 @@ $timer.Start()
 
 # Checkbox state tracking -- update button text and Remind availability
 # when any checkbox in the ListView is toggled.
+$script:UpdatingSelection = $false
 $script:UpdateButtonState = {
+    if ($script:UpdatingSelection) { return }
     $selectedCount = @($sortedRows | Where-Object { $_.IsSelected -and $_.CanUpdate }).Count
     $updatableCount = @($sortedRows | Where-Object CanUpdate).Count
+    $selectAllCb.IsEnabled = @($sortedRows | Where-Object { $_.CanUpdate -and -not $_.IsFinalDay }).Count -gt 0
+    $selectAllCb.IsChecked = if ($selectedCount -eq 0) { $false }
+                            elseif ($selectedCount -eq $updatableCount) { $true }
+                            else { $null }
     $updateNowBtn.IsEnabled = $updatableCount -gt 0
     if ($selectedCount -eq 0) {
         $updateNowBtn.Content = 'Update Now'
@@ -1063,6 +1104,23 @@ $script:UpdateButtonState = {
         $remindBtn.IsEnabled = $false
     }
 }
+
+$selectAllCb.Add_Click({
+    # Use the row selection rather than the checkbox's automatic toggle, so a
+    # click from a partial selection always selects every available update.
+    $availableRows = @($sortedRows | Where-Object CanUpdate)
+    $selectAll = @($availableRows | Where-Object { -not $_.IsSelected }).Count -gt 0
+    $script:UpdatingSelection = $true
+    try {
+        foreach ($row in $availableRows) {
+            $row.IsSelected = $selectAll -or $row.IsFinalDay
+        }
+        # WauAppRow does not implement change notifications; refresh the bindings.
+        $appListCtrl.Items.Refresh()
+    }
+    finally { $script:UpdatingSelection = $false }
+    & $script:UpdateButtonState
+})
 
 # Set initial button state (final-day apps start pre-checked)
 & $script:UpdateButtonState

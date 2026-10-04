@@ -1,0 +1,36 @@
+###  POLICY CYCLE - 10/04/2026 11:52:38  ###
+
+
+Latest applied settings:
+
+Name                      Value   
+----                      -----   
+WAU_NotificationLevel     Full    
+WAU_UserContext           1       
+WAU_DisableAutoUpdate     1       
+WAU_UpdatesInterval       Never   
+WAU_UpdatesAtLogon        1       
+WAU_UseWhiteList          0       
+WAU_ListPath                      
+WAU_ModsPath                      
+WAU_AzureBlobSASURL               
+WAU_DoNotRunOnMetered     1       
+WAU_UpdatesAtTime         06:00:00
+WAU_UpdatesTimeDelay      00:00   
+WAU_BypassListForUsers    0       
+WAU_MaxLogFiles           3       
+WAU_MaxLogSize            1048576 
+WAU_UpdatePrerelease      0       
+WAU_AppInstallerShortcut  0       
+WAU_DesktopShortcut       0       
+WAU_StartMenuShortcut     0       
+WAU_DeferralDays          0       
+WAU_GitHubToken                   
+WAU_SharedCachePath               
+WAU_UpdateDeadlineDays    0       
+WAU_UpdateDeadlineHours   1       
+WAU_CompanyName                   
+WAU_ReminderIntervalDays  2       
+WAU_ReminderIntervalHours 1       
+
+

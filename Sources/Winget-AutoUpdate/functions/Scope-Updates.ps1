@@ -701,7 +701,7 @@ function Write-WauAtomicJson {
 # SYSTEM owns requests; the target user can write only that request's response.
 # Never execute scripts, installer arguments or a machine update from a response.
 function Invoke-WauUserOperation {
-    param([ValidateSet('Scan','Plan','Update')][string]$Operation, [string]$UserSid,
+    param([ValidateSet('Scan','Plan','Update','Verify')][string]$Operation, [string]$UserSid,
           [array]$Apps = @(), [int]$TimeoutSeconds = 600)
     if (-not [Security.Principal.WindowsIdentity]::GetCurrent().IsSystem) { throw 'User delegation requires SYSTEM.' }
     if ($UserSid -notmatch '^S-1-5-21-\d+-\d+-\d+-\d+$' -and $UserSid -notmatch '^S-1-12-1-\d+-\d+-\d+-\d+$') { throw 'Invalid target user SID.' }
@@ -797,6 +797,9 @@ function Invoke-WauPendingUserOperation {
                 }
                 $response.Apps = $planned
             }
+            elseif ($request.Operation -eq 'Verify') {
+                $response.Apps = @(Get-WauUserVersionEvidence -Apps $request.Apps -Source $request.Source)
+            }
             elseif ($request.Operation -eq 'Update') {
                 $Script:InstallOK = 0
                 $fresh = @(Get-WingetOutdatedApps -src $request.Source -Scope user)
@@ -821,5 +824,37 @@ function Invoke-WauPendingUserOperation {
         return $true
     }
     return $false
+}
+
+# Completion acknowledgements are hints. Re-query each queued version in a
+# separate user operation before accepting completion. The owning user remains
+# the trust boundary; this is not attestation against a hostile local user.
+function Confirm-WauUserUpdateResults {
+    param([array]$Apps, [array]$Completed, [string]$UserSid)
+    $candidates = @($Apps | Where-Object {
+        $queued = $_
+        @($Completed | Where-Object { $_.Key -eq $queued.Key -and $_.Id -eq $queued.Id }).Count -gt 0
+    })
+    if ($candidates.Count -eq 0) { return }
+    $evidence = @(Invoke-WauUserOperation -Operation Verify -UserSid $UserSid -Apps $candidates)
+    foreach ($app in $candidates) {
+        if (@($evidence | Where-Object {
+            $_.Key -eq $app.Key -and $_.Id -eq $app.Id -and
+            $_.AvailableVersion -eq $app.AvailableVersion -and $_.Verified -eq $true
+        }).Count -gt 0) { $app }
+    }
+}
+
+function Get-WauUserVersionEvidence {
+    param([array]$Apps, [string]$Source)
+    if ([Security.Principal.WindowsIdentity]::GetCurrent().IsSystem) { throw 'User verification must run as the owner.' }
+    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    foreach ($app in $Apps) {
+        if ($app.Scope -ne 'user' -or $app.UserSid -ne $sid -or $app.Source -ne $Source -or
+            $app.Key -ne (Get-WauAppKey $app)) { continue }
+        if (Confirm-Installation $app.Id $app.AvailableVersion $Source -Scope user) {
+            [pscustomobject]@{ Key=$app.Key; Id=$app.Id; AvailableVersion=$app.AvailableVersion; Verified=$true }
+        }
+    }
 }
 

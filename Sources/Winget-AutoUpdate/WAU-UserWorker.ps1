@@ -49,6 +49,9 @@ try {
         }
         $response.Apps = $planned
     }
+    elseif ($request.Operation -eq 'Verify') {
+        $response.Apps = @(Get-WauUserVersionEvidence -Apps $request.Apps -Source $request.Source)
+    }
     elseif ($request.Operation -eq 'Update') {
         $null = Get-NotifLocale
         $Script:InstallOK = 0

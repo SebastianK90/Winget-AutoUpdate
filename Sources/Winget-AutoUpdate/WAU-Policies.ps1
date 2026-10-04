@@ -139,7 +139,10 @@ if ($GPOManagementDetected) {
 
     # Log applied configuration
     Add-Content -Path $GPOLogFile -Value "`nLatest applied settings:"
-    $WAUConfig.PSObject.Properties | Where-Object { $_.Name -like "WAU_*" } | Select-Object Name, Value | Out-File -Encoding default -FilePath $GPOLogFile -Append
+    $WAUConfig.PSObject.Properties | Where-Object { $_.Name -like "WAU_*" } |
+        Select-Object Name, @{Name='Value'; Expression={
+            if ($_.Name -in @('WAU_GitHubToken', 'WAU_AzureBlobSASURL')) { '[redacted]' } else { $_.Value }
+        }} | Out-File -Encoding default -FilePath $GPOLogFile -Append
 
 }
 

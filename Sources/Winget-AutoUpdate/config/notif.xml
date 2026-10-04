@@ -1,0 +1,14 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<toast>
+  <visual>
+    <binding template="ToastGeneric">
+      <image placement="appLogoOverride" src="C:\Program Files\Winget-AutoUpdate\icons\success.png" />
+      <text>Notepad++ (x64) updated.</text>
+      <text>Installed version: 8.9.8.1</text>
+    </binding>
+  </visual>
+  <actions>
+    <action content="See changelog" arguments="https://github.com/notepad-plus-plus/notepad-plus-plus/releases/tag/v8.9.8.1&#xD;" activationType="Protocol" />
+  </actions>
+  <tag>Notepad++ (x64)</tag>
+</toast>
